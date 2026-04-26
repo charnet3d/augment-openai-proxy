@@ -1,0 +1,27 @@
+{
+  "name": "augment-oai-proxy",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@augmentcode/auggie-sdk": "^0.1.15",
+    "@types/node": "^22.19.17",
+    "hono": "^4.12.15",
+    "typescript": "5.7"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.5",
+    "tsx": "^4.21.0",
+    "vitest": "^4.1.5"
+  }
+}

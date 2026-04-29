@@ -11,9 +11,33 @@ export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
  */
 export type ReasoningSummary = "auto" | "concise" | "detailed";
 
+/**
+ * Text part of an OpenAI multimodal `content` array.
+ */
+export interface ChatCompletionContentPartText {
+  type: "text";
+  text: string;
+}
+
+/**
+ * Image part of an OpenAI multimodal `content` array. The `url` may be a
+ * regular http(s) URL or an inline `data:<mime>;base64,<data>` URL.
+ */
+export interface ChatCompletionContentPartImage {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+}
+
+export type ChatCompletionContentPart =
+  | ChatCompletionContentPartText
+  | ChatCompletionContentPartImage;
+
 export interface ChatCompletionMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | ChatCompletionContentPart[] | null;
   tool_calls?: ChatCompletionToolCall[];
   tool_call_id?: string;
   name?: string;

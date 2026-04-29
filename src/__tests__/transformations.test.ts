@@ -220,6 +220,78 @@ describe("transformMessages", () => {
     ]);
   });
 
+  it("should transform user message with multimodal text + image_url (data URL)", () => {
+    const dataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const result = transformMessages([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What's in this image?" },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ]);
+
+    expect(result).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What's in this image?" },
+          {
+            type: "image",
+            image:
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+            mediaType: "image/png",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("should transform user message with image_url (remote http URL)", () => {
+    const result = transformMessages([
+      {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: "https://example.com/cat.jpg" } },
+        ],
+      },
+    ]);
+
+    const content = (result[0] as any).content as any[];
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("image");
+    expect(content[0].image).toBeInstanceOf(URL);
+    expect((content[0].image as URL).href).toBe("https://example.com/cat.jpg");
+    expect(content[0].mediaType).toBeUndefined();
+  });
+
+  it("should flatten system message with array text parts to a string", () => {
+    const result = transformMessages([
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "You are " },
+          { type: "text", text: "helpful." },
+        ],
+      } as ChatCompletionMessage,
+    ]);
+
+    expect(result).toEqual([{ role: "system", content: "You are helpful." }]);
+  });
+
+  it("should flatten assistant message with array text parts to a string", () => {
+    const result = transformMessages([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+      } as ChatCompletionMessage,
+    ]);
+
+    expect(result).toEqual([{ role: "assistant", content: "ok" }]);
+  });
+
   it("should handle a full conversation with multiple message types", () => {
     const result = transformMessages([
       { role: "system", content: "You are an assistant." },

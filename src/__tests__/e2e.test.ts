@@ -505,6 +505,109 @@ describeE2E("e2e — real Augment API", () => {
     }, 30_000);
   });
 
+  // ── POST /v1/chat/completions (image input — experimental) ──────────────
+  // Mirrors the OpenWebUI request shape that originally surfaced the image
+  // drop-through bug: a user message with mixed text + image_url parts where
+  // the URL is a base64 data URL. Exercises the runtime SDK patch end-to-end.
+  describe("POST /v1/chat/completions (image input)", () => {
+    let visionModelId = "";
+
+    beforeAll(async () => {
+      const res = await app.fetch(new Request("http://localhost/v1/models"));
+      if (res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json();
+        const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+        // Prefer Claude — universally vision-capable on Augment — then fall
+        // back to GPT/Gemini, then to whatever the discovery picked.
+        visionModelId =
+          ids.find((id) => id.startsWith("claude-sonnet")) ??
+          ids.find((id) => id.startsWith("claude-haiku")) ??
+          ids.find((id) => id.startsWith("claude")) ??
+          ids.find((id) => id.startsWith("gpt-")) ??
+          ids.find((id) => id.startsWith("gemini")) ??
+          testModelId;
+      } else {
+        visionModelId = testModelId;
+      }
+    }, 20_000);
+
+    // Tiny 66×75 PNG captured from a real OpenWebUI request body.
+    const PNG_DATA_URL =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEIAAABLCAYAAADEW1EgAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAHMSURBVHhe7ZphasMwDEZ7jcLon+wE7f1PNEaP0GFwIDzs2HHMYlnfA/2SZKxndWx0t5sQQgghhBiXn8fy+v36/pQi1LF3GmolTC+EQ9bGVDK4DbnhWFfTY4qjA+WEsM4UHIr5HOyrlTgkHKZlkClkcAjma6DM1nMuhQO0vihltJxxGbz82RftccYl8OJnX5NiW8/5dyigx+V5HvNDwkv3kMGtYH5IKIDRKsScCL5eKthTw9n+y8gJcbMRWyiB+SP0OucSuBWt2xAwLSLArWiVYV4Et6JVhnkRgZQM1pQ40zsUlPF+LM9UPrct04gIUMZ28NKgpbw53vflSRkM9gRKeZOkNqM0aClvmj0h/FkxtYjAnoxc8IxpOCqD/VPBYXPBj8x0uHnxEhIRkYiIREQkIiIREYmIuBRR+k2S9dNREuBCRK2EqUWkJPBvBoqo6TFF7UAUwZ5S//BwCOZXWJMSyDAjhMPsXXytTdXwHEaqZyh4YeaPsieEtUOxvXjPV6OQnmcPwd7Hww18ZeZdQAluRVCCy48Gt8GlhAC3gXkX8AvhsA0uNyQ1MDfEhYx1I7b/NMKNcCMjR0qIZEhGWgZr3LCV4XYjhBBCiHH5Azu2MNsH4SA7AAAAAElFTkSuQmCC";
+
+    it("accepts an OpenAI-style image_url part and returns a response that acknowledges the image", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: visionModelId,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "what can you see ?" },
+                  { type: "image_url", image_url: { url: PNG_DATA_URL } },
+                ],
+              },
+            ],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+
+      // Standard OpenAI envelope.
+      expect(body.id).toMatch(/^chatcmpl-/);
+      expect(body.object).toBe("chat.completion");
+      expect(body.model).toBe(visionModelId);
+      expect(body.choices).toHaveLength(1);
+
+      const choice = body.choices[0];
+      expect(choice.message.role).toBe("assistant");
+      expect(typeof choice.message.content).toBe("string");
+      expect((choice.message.content as string).length).toBeGreaterThan(0);
+      expect(choice.finish_reason).toBe("stop");
+
+      // The original bug: the SDK silently dropped the image and the model
+      // replied with "no image was attached". Assert the reply does *not*
+      // claim the image is missing — that's the regression guard.
+      const reply = (choice.message.content as string).toLowerCase();
+      const droppedImagePhrases = [
+        "no image",
+        "wasn't attached",
+        "wasn't provided",
+        "was not attached",
+        "was not provided",
+        "didn't receive",
+        "did not receive",
+        "no attachment",
+        "i can't see",
+        "i cannot see",
+        "i don't see",
+        "i do not see",
+        "unable to see",
+      ];
+      for (const phrase of droppedImagePhrases) {
+        expect(
+          reply,
+          `model replied as if no image was attached: ${reply}`,
+        ).not.toContain(phrase);
+      }
+
+      // Usage shape stays consistent.
+      expect(body.usage).toBeDefined();
+      expect(typeof body.usage.prompt_tokens).toBe("number");
+      expect(typeof body.usage.completion_tokens).toBe("number");
+      expect(body.usage.total_tokens).toBe(
+        body.usage.prompt_tokens + body.usage.completion_tokens
+      );
+    }, 60_000);
+  });
+
   // ── POST /v1/chat/completions (reasoning) ────────────────────────────────
   // The Augment SDK does not currently forward `reasoningEffort` upstream,
   // so the test does not assert that reasoning content *must* be returned.

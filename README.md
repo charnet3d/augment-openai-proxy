@@ -142,10 +142,34 @@ Tool calling (function calling) is supported via the Augment SDK:
 }
 ```
 
+### Image input (experimental)
+
+Image input is supported via the standard OpenAI `image_url` content part:
+
+```json
+{
+  "model": "claude-sonnet-4-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What's in this image?" },
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+      ]
+    }
+  ]
+}
+```
+
+Both data URLs (`data:image/<png|jpeg|gif|webp>;base64,...`) and remote URLs are accepted; remote URLs are downloaded by the AI SDK before being forwarded. Audio is not supported.
+
+This feature relies on a runtime patch of `@augmentcode/auggie-sdk` because the upstream SDK does not yet expose its image wire format. The wire shape may change without notice on the Augment side.
+
 ## Known Limitations
 
 - **Token counting** — Augment does not expose exact token counts.
-- **No multimodal** — image and audio inputs are not supported.
+- **Image input is experimental** — see above; relies on a runtime SDK patch and may break on upstream changes.
+- **No audio input** — audio content parts are not supported.
 - **Rate limits** — subject to your Augment account tier.
 
 ## Troubleshooting
@@ -158,12 +182,27 @@ Tool calling (function calling) is supported via the Augment SDK:
 | Streaming hangs | Ensure `stream: true` is set in the request body and the client supports SSE. |
 | SDK connection errors | Check your network connection and that `~/.augment/session.json` exists and is not expired. Run `auggie login` to refresh. |
 
+## Development
+
+### Tests
+
+| Command | Scope |
+|---|---|
+| `npm test` | Unit + integration tests. No network. Safe to run in CI without secrets. |
+| `npm run test:watch` | Unit + integration tests in watch mode. |
+| `npm run test:coverage` | Unit + integration tests with v8 coverage report. |
+| `npm run test:e2e` | End-to-end tests against the real Augment API. Requires `auggie login` or `AUGMENT_API_TOKEN` + `AUGMENT_API_URL` in `.env`; the suite self-skips when no credentials are detected. |
+
+The e2e suite is excluded from the default run via `vitest.config.ts` and lives under its own config (`vitest.e2e.config.ts`) so unit-test runs stay hermetic and fast.
+
 ## Project Structure
 
 ```
 src/
   index.ts          # Entry point — starts the Hono server
   routes/           # OpenAI-compatible route handlers
-  services/         # Augment SDK client and completion logic
+  services/         # Augment SDK client + experimental image patch
   types/            # Shared TypeScript types
+  utils/            # Request/response transformers
+  __tests__/        # Vitest unit, integration, and e2e suites
 ```

@@ -12,6 +12,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 type AiTextPart = { type: "text"; text: string };
+type AiImagePart = {
+  type: "image";
+  // AI SDK v5: base64 string, Uint8Array, ArrayBuffer, Buffer, or URL.
+  image: string | URL | Uint8Array | ArrayBuffer | Buffer;
+  mediaType?: string;
+};
 type AiToolCallPart = {
   type: "tool-call";
   toolCallId: string;
@@ -29,7 +35,7 @@ type AiToolResultPart = {
 
 export type CoreMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | Array<AiTextPart | AiImagePart> }
   | { role: "assistant"; content: string | Array<AiTextPart | AiToolCallPart> }
   | { role: "tool"; content: AiToolResultPart[] };
 
@@ -59,10 +65,72 @@ export function safeJsonParse(input: string): unknown {
 }
 
 /**
+ * Convert a possibly-multimodal `image_url.url` (data URL or remote URL) into
+ * an AI SDK `ImagePart`-compatible `{ image, mediaType? }` payload.
+ *
+ * - `data:<mime>;base64,<b64>` is split into the raw base64 string and its
+ *   media type so providers (Anthropic, etc.) get them as separate fields.
+ * - Other strings are wrapped as a `URL` instance when parseable, and passed
+ *   through as-is otherwise (some providers accept opaque URI strings).
+ */
+function transformImageUrl(url: string): { image: string | URL; mediaType?: string } {
+  if (url.startsWith("data:")) {
+    const m = /^data:([^;,]+)?(?:;base64)?,(.+)$/.exec(url);
+    if (m) {
+      return { image: m[2], mediaType: m[1] || undefined };
+    }
+  }
+  try {
+    return { image: new URL(url) };
+  } catch {
+    return { image: url };
+  }
+}
+
+/**
+ * Flatten OpenAI multimodal `content` to a plain string (text parts only).
+ * Used for roles that the AI SDK requires to be string-typed (e.g. system).
+ */
+function contentToText(content: ChatCompletionMessage["content"]): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  return content
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+/**
+ * Convert OpenAI user `content` (string or multimodal array) into the AI SDK
+ * user-message content shape.
+ */
+function transformUserContent(
+  content: ChatCompletionMessage["content"]
+): string | Array<AiTextPart | AiImagePart> {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+
+  const parts: Array<AiTextPart | AiImagePart> = [];
+  for (const p of content) {
+    if (p.type === "text") {
+      parts.push({ type: "text", text: p.text });
+    } else if (p.type === "image_url") {
+      const url = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
+      if (!url) continue;
+      const { image, mediaType } = transformImageUrl(url);
+      parts.push({ type: "image", image, ...(mediaType && { mediaType }) });
+    }
+  }
+  return parts;
+}
+
+/**
  * Transform OpenAI messages to AI SDK CoreMessage format.
  *
  * - tool role messages need the toolName resolved from preceding assistant
  *   messages (OpenAI omits it; the AI SDK requires it).
+ * - user messages may carry OpenAI multimodal `content` arrays (text +
+ *   image_url parts), which are mapped to AI SDK TextPart / ImagePart.
  */
 export function transformMessages(messages: ChatCompletionMessage[]): CoreMessage[] {
   // Pre-scan: build tool_call_id → toolName lookup
@@ -78,18 +146,19 @@ export function transformMessages(messages: ChatCompletionMessage[]): CoreMessag
   return messages.flatMap((msg): CoreMessage[] => {
     switch (msg.role) {
       case "system":
-        return [{ role: "system", content: msg.content ?? "" }];
+        return [{ role: "system", content: contentToText(msg.content) }];
 
       case "user":
-        return [{ role: "user", content: msg.content ?? "" }];
+        return [{ role: "user", content: transformUserContent(msg.content) }];
 
       case "assistant": {
+        const text = contentToText(msg.content);
         if (!msg.tool_calls?.length) {
-          return [{ role: "assistant", content: msg.content ?? "" }];
+          return [{ role: "assistant", content: text }];
         }
         const parts: Array<AiTextPart | AiToolCallPart> = [];
-        if (msg.content) {
-          parts.push({ type: "text", text: msg.content });
+        if (text) {
+          parts.push({ type: "text", text });
         }
         for (const tc of msg.tool_calls) {
           parts.push({
@@ -118,14 +187,14 @@ export function transformMessages(messages: ChatCompletionMessage[]): CoreMessag
                   toolCallIdToName.get(msg.tool_call_id ?? "") ??
                   msg.name ??
                   "unknown",
-                output: { type: "text", value: msg.content ?? "" },
+                output: { type: "text", value: contentToText(msg.content) },
               },
             ],
           },
         ];
 
       default:
-        return [{ role: "user", content: msg.content ?? "" }];
+        return [{ role: "user", content: transformUserContent(msg.content) }];
     }
   });
 }

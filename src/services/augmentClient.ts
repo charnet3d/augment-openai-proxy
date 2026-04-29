@@ -3,6 +3,7 @@ import {
   resolveAugmentCredentials,
   type AugmentCredentials,
 } from "@augmentcode/auggie-sdk";
+import { patchModelForImages } from "./augmentImagePatch";
 
 // Cache resolved credentials for the process lifetime to avoid repeated
 // session-file reads. The SDK's resolveAugmentCredentials() reads
@@ -42,6 +43,11 @@ export async function getAugmentModel(modelId: string): Promise<AugmentLanguageM
   //   const payload = originalBuildPayload(options);
   //   return { ...payload, mode: "CHAT" };
   // };
+
+  // Experimental: enable image input by injecting Augment IMAGE nodes for
+  // AI SDK v5 file parts. The SDK drops images by default. Falls back to the
+  // SDK's original buildPayload for prompts without images.
+  patchModelForImages(model);
 
   return model;
 }

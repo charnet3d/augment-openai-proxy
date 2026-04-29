@@ -8,7 +8,7 @@ import type {
   ReasoningSummary,
 } from "../types/openai";
 import { getAugmentModel } from "../services/augmentClient";
-import { isModelAvailable, getModelIds } from "../services/modelRegistry";
+import { isModelAvailable, getModelIds, resolveEffortModelId } from "../services/modelRegistry";
 import {
   transformMessages,
   transformTools,
@@ -131,7 +131,20 @@ router.post("/completions", async (c) => {
     const requestId = generateId();
     const timestamp = Math.floor(Date.now() / 1000);
 
-    const modelInstance = await getAugmentModel(modelId);
+    const reasoningConfig = resolveReasoningConfig(body);
+    const providerOptions = buildProviderOptions(reasoningConfig);
+
+    // Augment encodes reasoning depth in the model ID itself (e.g.
+    // `claude-opus-4-7-high`). When the client asks for an effort level on a
+    // base model that advertises one, swap to the suffixed variant so the
+    // backend actually picks up the depth. Already-suffixed IDs and models
+    // without advertised levels pass through unchanged.
+    const effectiveModelId =
+      (reasoningConfig?.effort
+        ? await resolveEffortModelId(modelId, reasoningConfig.effort)
+        : undefined) ?? modelId;
+
+    const modelInstance = await getAugmentModel(effectiveModelId);
     const messages = transformMessages(body.messages || []);
     const tools = transformTools(body.tools);
     const toolChoice = transformToolChoice(body.tool_choice);
@@ -140,8 +153,6 @@ router.post("/completions", async (c) => {
       : body.stop
         ? [body.stop]
         : undefined;
-    const reasoningConfig = resolveReasoningConfig(body);
-    const providerOptions = buildProviderOptions(reasoningConfig);
 
     const isStreaming = body.stream === true;
 

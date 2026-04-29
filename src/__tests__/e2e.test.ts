@@ -761,4 +761,115 @@ describeE2E("e2e — real Augment API", () => {
       expect(chunks.at(-1).choices[0].finish_reason).toBe("stop");
     }, 60_000);
   });
+
+  // ── POST /v1/chat/completions (reasoning effort → model suffix) ──────────
+  // Augment encodes reasoning depth in the model ID itself
+  // (e.g. `claude-opus-4-7-high`). The proxy exposes both forms:
+  //   1. The suffixed ID directly in /v1/models, so clients can target it.
+  //   2. The base ID + `reasoning_effort` body field, which the proxy rewrites
+  //      to the suffixed ID before calling the backend.
+  // This suite verifies BOTH paths return 200 against the live API for a
+  // model that actually advertises effort levels (and is not muted via
+  // AUGMENT_DISABLE_EFFORT_MODELS), proving the suffixing isn't 404'd.
+  describe("POST /v1/chat/completions (reasoning effort suffixing)", () => {
+    // Resolved in beforeAll: a base model ID, one of its advertised effort
+    // suffixes, and the corresponding suffixed ID.
+    let effortBaseId = "";
+    let effortLevel = "";
+    let effortSuffixedId = "";
+
+    const EFFORT_SUFFIX_RE = /-(low|medium|high|max|xhigh)$/;
+
+    beforeAll(async () => {
+      const res = await app.fetch(new Request("http://localhost/v1/models"));
+      if (!res.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await res.json();
+      const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+      const idSet = new Set(ids);
+      // Find any suffixed ID whose base also exists in the registry.
+      for (const id of ids) {
+        const m = EFFORT_SUFFIX_RE.exec(id);
+        if (!m) continue;
+        const base = id.slice(0, -m[0].length);
+        if (idSet.has(base)) {
+          effortBaseId = base;
+          effortLevel = m[1];
+          effortSuffixedId = id;
+          break;
+        }
+      }
+    }, 20_000);
+
+    it("accepts a suffixed model ID directly and echoes it back", async () => {
+      if (!effortSuffixedId) return; // no effort-capable model on this account
+      const response = await app.fetch(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: effortSuffixedId,
+            messages: [
+              {
+                role: "user",
+                content: 'Reply with exactly the word "pong" and nothing else.',
+              },
+            ],
+          }),
+        })
+      );
+
+      expect(
+        response.status,
+        `suffixed model ${effortSuffixedId} returned ${response.status}`
+      ).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      expect(body.model).toBe(effortSuffixedId);
+      expect(body.choices[0].message.role).toBe("assistant");
+      expect((body.choices[0].message.content as string).toLowerCase()).toContain("pong");
+      expect(body.choices[0].finish_reason).toBe("stop");
+    }, 60_000);
+
+    it("rewrites base model + reasoning_effort to the suffixed backend ID and preserves the base ID in the response", async () => {
+      if (!effortBaseId) return;
+      // Map the discovered Augment level back to an OpenAI effort value.
+      // OpenAI accepts: minimal | low | medium | high. "max"/"xhigh" snap
+      // down to "high" in resolveEffortModelId; "low"/"medium"/"high" pass
+      // through; "minimal" is an alias for the lowest level.
+      const openaiEffort =
+        effortLevel === "low" || effortLevel === "medium" || effortLevel === "high"
+          ? effortLevel
+          : "high";
+
+      const response = await app.fetch(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: effortBaseId,
+            messages: [
+              {
+                role: "user",
+                content: 'Reply with exactly the word "pong" and nothing else.',
+              },
+            ],
+            reasoning_effort: openaiEffort,
+          }),
+        })
+      );
+
+      expect(
+        response.status,
+        `base ${effortBaseId} + reasoning_effort=${openaiEffort} returned ${response.status}`
+      ).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      // Response must echo the original (base) model ID — not the rewritten one.
+      expect(body.model).toBe(effortBaseId);
+      expect(body.choices[0].message.role).toBe("assistant");
+      expect((body.choices[0].message.content as string).toLowerCase()).toContain("pong");
+      expect(body.choices[0].finish_reason).toBe("stop");
+    }, 60_000);
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock node:child_process so tests never call the real auggie binary
 vi.mock("node:child_process", () => ({
@@ -26,7 +26,7 @@ describe("modelRegistry", () => {
     // Reset module cache so cachedModelIds is cleared between tests
     vi.resetModules();
     const cp = await import("node:child_process");
-    execFileMock = cp.execFile as ReturnType<typeof vi.fn>;
+    execFileMock = cp.execFile as unknown as ReturnType<typeof vi.fn>;
     execFileMock.mockReset();
   });
 
@@ -191,6 +191,188 @@ describe("modelRegistry", () => {
         expect(id).not.toMatch(/\./);
       }
     });
+  });
+});
+
+// CLI output mirroring real `auggie models list --json` payloads, where some
+// entries advertise effortLevels and others don't. The registry must expand
+// each effort level into a suffixed canonical ID.
+const EFFORT_CLI_OUTPUT = JSON.stringify({
+  registryAvailable: true,
+  models: [
+    { shortName: "haiku4.5", displayName: "Haiku 4.5" },
+    {
+      shortName: "opus4.6",
+      displayName: "Opus 4.6",
+      effortLevels: ["Low", "Medium", "High", "Max"],
+    },
+    {
+      shortName: "opus4.7",
+      displayName: "Opus 4.7",
+      effortLevels: ["Medium", "High", "xHigh"],
+    },
+  ],
+});
+
+describe("modelRegistry — effort variants", () => {
+  let execFileMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const cp = await import("node:child_process");
+    execFileMock = cp.execFile as unknown as ReturnType<typeof vi.fn>;
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: object, cb: Function) =>
+        cb(null, EFFORT_CLI_OUTPUT)
+    );
+  });
+
+  it("expands each advertised effortLevel into a suffixed canonical ID", async () => {
+    const { listModels } = await import("../services/modelRegistry");
+    const ids = (await listModels()).data.map((m) => m.id);
+    expect(ids).toEqual([
+      "claude-haiku-4-5",
+      "claude-opus-4-6",
+      "claude-opus-4-6-low",
+      "claude-opus-4-6-medium",
+      "claude-opus-4-6-high",
+      "claude-opus-4-6-max",
+      "claude-opus-4-7",
+      "claude-opus-4-7-medium",
+      "claude-opus-4-7-high",
+      "claude-opus-4-7-xhigh",
+    ]);
+  });
+
+  it("treats suffixed variants as available models", async () => {
+    const { isModelAvailable } = await import("../services/modelRegistry");
+    expect(await isModelAvailable("claude-opus-4-7-high")).toBe(true);
+    expect(await isModelAvailable("claude-opus-4-7-xhigh")).toBe(true);
+    expect(await isModelAvailable("claude-opus-4-6-low")).toBe(true);
+  });
+
+  it("does not invent a suffix when the model omits effortLevels", async () => {
+    const { isModelAvailable } = await import("../services/modelRegistry");
+    expect(await isModelAvailable("claude-haiku-4-5")).toBe(true);
+    expect(await isModelAvailable("claude-haiku-4-5-high")).toBe(false);
+  });
+});
+
+describe("resolveEffortModelId", () => {
+  let execFileMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const cp = await import("node:child_process");
+    execFileMock = cp.execFile as unknown as ReturnType<typeof vi.fn>;
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: object, cb: Function) =>
+        cb(null, EFFORT_CLI_OUTPUT)
+    );
+  });
+
+  it("returns the suffixed ID for an exact-match effort level", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBe("claude-opus-4-6-high");
+    expect(await resolveEffortModelId("claude-opus-4-6", "low")).toBe("claude-opus-4-6-low");
+    expect(await resolveEffortModelId("claude-opus-4-7", "medium")).toBe("claude-opus-4-7-medium");
+  });
+
+  it("snaps an unsupported level to the closest advertised level", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    // opus4.7 has no "low" — closest is "medium".
+    expect(await resolveEffortModelId("claude-opus-4-7", "low")).toBe("claude-opus-4-7-medium");
+  });
+
+  it("maps OpenAI 'minimal' to the lowest advertised level", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    // opus4.6 advertises Low → exact match.
+    expect(await resolveEffortModelId("claude-opus-4-6", "minimal")).toBe("claude-opus-4-6-low");
+    // opus4.7 has no Low → snap to Medium (closest to "low").
+    expect(await resolveEffortModelId("claude-opus-4-7", "minimal")).toBe("claude-opus-4-7-medium");
+  });
+
+  it("returns undefined when the base model has no effortLevels", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-haiku-4-5", "high")).toBeUndefined();
+  });
+
+  it("returns undefined for an unknown base model", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-unknown-99", "high")).toBeUndefined();
+  });
+
+  it("returns undefined for an already-suffixed model ID (no double-suffix)", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-7-high", "low")).toBeUndefined();
+  });
+});
+
+describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
+  let execFileMock: ReturnType<typeof vi.fn>;
+  const ORIGINAL_ENV = process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const cp = await import("node:child_process");
+    execFileMock = cp.execFile as unknown as ReturnType<typeof vi.fn>;
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: object, cb: Function) =>
+        cb(null, EFFORT_CLI_OUTPUT)
+    );
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+    else process.env.AUGMENT_DISABLE_EFFORT_MODELS = ORIGINAL_ENV;
+  });
+
+  it("strips suffixed variants from /v1/models for disabled base IDs", async () => {
+    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
+    const { listModels } = await import("../services/modelRegistry");
+    const ids = (await listModels()).data.map((m) => m.id);
+    // opus-4-6 base is still listed, but its suffixed variants are gone.
+    expect(ids).toContain("claude-opus-4-6");
+    expect(ids).not.toContain("claude-opus-4-6-low");
+    expect(ids).not.toContain("claude-opus-4-6-medium");
+    expect(ids).not.toContain("claude-opus-4-6-high");
+    expect(ids).not.toContain("claude-opus-4-6-max");
+    // opus-4-7 variants are untouched.
+    expect(ids).toContain("claude-opus-4-7-high");
+    expect(ids).toContain("claude-opus-4-7-xhigh");
+  });
+
+  it("makes resolveEffortModelId return undefined for disabled base IDs", async () => {
+    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
+    // opus-4-7 still resolves normally.
+    expect(await resolveEffortModelId("claude-opus-4-7", "high")).toBe("claude-opus-4-7-high");
+  });
+
+  it("accepts CLI short names and normalises them through expandShortName", async () => {
+    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "opus4.6";
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
+  });
+
+  it("supports multiple comma- or whitespace-separated entries", async () => {
+    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6, claude-opus-4-7";
+    const { resolveEffortModelId, listModels } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
+    expect(await resolveEffortModelId("claude-opus-4-7", "high")).toBeUndefined();
+    const ids = (await listModels()).data.map((m) => m.id);
+    expect(ids.filter((i) => i.startsWith("claude-opus-4-6-"))).toEqual([]);
+    expect(ids.filter((i) => i.startsWith("claude-opus-4-7-"))).toEqual([]);
+  });
+
+  it("is a no-op when the env var is unset or empty", async () => {
+    delete process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBe("claude-opus-4-6-high");
   });
 });
 

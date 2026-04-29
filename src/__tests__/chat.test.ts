@@ -1,18 +1,23 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 
 // ── Mock the SDK at the top level ─────────────────────────────
 const mockResolveCredentials = vi.fn();
 const mockDoGenerate = vi.fn();
 const mockDoStream = vi.fn();
+// Captures `new AugmentLanguageModel(modelId, options)` calls so tests can
+// assert which model ID was actually instantiated (e.g. after effort-suffix
+// rewriting).
+const constructorCalls: Array<{ modelId: string; options: object }> = [];
 
 // Use a class-based mock so it works with `new AugmentLanguageModel(...)`
 class MockAugmentLanguageModel {
   specificationVersion = "v2" as const;
   provider = "test-provider";
   modelId: string;
-  constructor(modelId: string, _options: object) {
+  constructor(modelId: string, options: object) {
     this.modelId = modelId;
+    constructorCalls.push({ modelId, options });
   }
   doGenerate = mockDoGenerate;
   doStream = mockDoStream;
@@ -32,6 +37,7 @@ describe("chat route", () => {
     mockResolveCredentials.mockClear();
     mockDoGenerate.mockClear();
     mockDoStream.mockClear();
+    constructorCalls.length = 0;
 
     // Reset credentials mock for each test
     mockResolveCredentials.mockResolvedValue({
@@ -787,6 +793,124 @@ describe("chat route", () => {
       expect(streamCallArgs.providerOptions).toEqual({
         augment: { reasoningEffort: "high" },
       });
+    });
+  });
+
+  describe("reasoning_effort model-ID rewrite", () => {
+    // These tests stub out modelRegistry.resolveEffortModelId so they don't
+    // depend on whether the host has the auggie CLI installed, and so they
+    // can assert the chat route honours whatever the registry returns.
+    let mockResolveEffort: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      mockResolveEffort = vi.fn();
+      vi.doMock("../services/modelRegistry", async () => {
+        const actual = await vi.importActual<typeof import("../services/modelRegistry")>(
+          "../services/modelRegistry"
+        );
+        return {
+          ...actual,
+          resolveEffortModelId: mockResolveEffort,
+        };
+      });
+      vi.resetModules();
+      const { default: chatRouter } = await import("../routes/chat");
+      app = new Hono();
+      app.route("/v1/chat", chatRouter);
+    });
+
+    afterEach(() => {
+      vi.doUnmock("../services/modelRegistry");
+    });
+
+    it("instantiates AugmentLanguageModel with the suffixed ID returned by the registry", async () => {
+      mockResolveEffort.mockResolvedValueOnce("claude-opus-4-7-high");
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-7",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning_effort: "high",
+        }),
+      });
+
+      const response = await app.fetch(req);
+      expect(response.status).toBe(200);
+      expect(mockResolveEffort).toHaveBeenCalledWith("claude-opus-4-7", "high");
+      expect(constructorCalls.at(-1)?.modelId).toBe("claude-opus-4-7-high");
+    });
+
+    it("keeps the original model ID when the registry returns undefined (no swap)", async () => {
+      mockResolveEffort.mockResolvedValueOnce(undefined);
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning_effort: "high",
+        }),
+      });
+
+      const response = await app.fetch(req);
+      expect(response.status).toBe(200);
+      expect(constructorCalls.at(-1)?.modelId).toBe("claude-haiku-4-5");
+    });
+
+    it("does not consult the registry when no reasoning_effort is set", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-7",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      await app.fetch(req);
+      expect(mockResolveEffort).not.toHaveBeenCalled();
+      expect(constructorCalls.at(-1)?.modelId).toBe("claude-opus-4-7");
+    });
+
+    it("preserves the originally-requested model in the response body", async () => {
+      mockResolveEffort.mockResolvedValueOnce("claude-opus-4-7-high");
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-7",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning_effort: "high",
+        }),
+      });
+
+      const body: any = await (await app.fetch(req)).json();
+      expect(body.model).toBe("claude-opus-4-7");
     });
   });
 });

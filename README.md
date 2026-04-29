@@ -34,6 +34,7 @@ AUGMENT_API_URL=
 | `HOST` | No | Bind address (default: `localhost`) |
 | `AUGMENT_API_TOKEN` | No | API token for authentication. Falls back to `auggie login` session if omitted. |
 | `AUGMENT_API_URL` | No | Tenant-specific API URL. Required when `AUGMENT_API_TOKEN` is set. |
+| `AUGMENT_DISABLE_EFFORT_MODELS` | No | Comma- or whitespace-separated list of base model IDs (or CLI short names) whose effort variants should be hidden from `/v1/models` and not used for `reasoning_effort` rewriting. See [Reasoning effort](#reasoning-effort). |
 
 ## Usage
 
@@ -141,6 +142,60 @@ Tool calling (function calling) is supported via the Augment SDK:
   ]
 }
 ```
+
+### Reasoning effort
+
+Augment encodes reasoning depth in the model ID itself: a base model like
+`claude-opus-4-7` exposes suffixed variants (`-low`, `-medium`, `-high`,
+`-max`, `-xhigh`) when the upstream advertises them. The proxy supports
+both forms:
+
+1. **Suffixed model ID directly.** Every advertised variant appears as its
+   own entry in `GET /v1/models`. Pass it as `model` and you get that
+   reasoning depth — e.g. `"model": "claude-opus-4-7-high"`.
+2. **OpenAI `reasoning_effort` on the base ID.** Send the base model with a
+   standard OpenAI `reasoning_effort` (`minimal` | `low` | `medium` | `high`)
+   and the proxy rewrites the request to the suffixed backend ID before
+   forwarding. The response echoes the original (base) `model` ID.
+
+```json
+{
+  "model": "claude-opus-4-7",
+  "messages": [{ "role": "user", "content": "Plan a refactor of foo()." }],
+  "reasoning_effort": "high"
+}
+```
+
+The Responses-API nested form is also accepted:
+`"reasoning": { "effort": "medium", "summary": "concise" }`. When both forms
+are set, the nested one wins.
+
+**Mapping rules.** Exact (case-insensitive) matches win. `minimal` is treated
+as `low` (Augment has no minimal tier). Otherwise the requested level snaps
+to the closest advertised level by index in `["low","medium","high","max",
+"xhigh"]` — so requesting `high` on a model that only advertises
+`["low","medium","max"]` resolves to `max`.
+
+If a model has no advertised effort levels, `reasoning_effort` is forwarded
+to the SDK as a `providerOptions.augment.reasoningEffort` hint and the
+model ID is left untouched.
+
+#### Disabling effort variants per model
+
+Some models advertise effort levels in the CLI but currently 404 on the
+backend when the suffixed ID is sent (observed for `claude-opus-4-6` —
+likely an entitlement/rollout gap). Suppress them with
+`AUGMENT_DISABLE_EFFORT_MODELS`:
+
+```env
+AUGMENT_DISABLE_EFFORT_MODELS=claude-opus-4-6
+# or, equivalently, using CLI short names:
+AUGMENT_DISABLE_EFFORT_MODELS=opus4.6,sonnet4.6
+```
+
+Listed models still appear in `/v1/models` under their base ID, but their
+suffixed variants are hidden and `reasoning_effort` against them is a
+no-op (the request is sent as-is to the base model).
 
 ### Image input (experimental)
 

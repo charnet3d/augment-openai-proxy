@@ -40,7 +40,7 @@ AUGMENT_API_URL=
 ### Start the proxy
 
 ```bash
-npm run dev
+npm run start
 # or
 npx tsx src/index.ts
 ```
@@ -144,10 +144,8 @@ Tool calling (function calling) is supported via the Augment SDK:
 
 ## Known Limitations
 
-- **Token counting** — reported token usage is approximate; Augment does not expose exact token counts.
-- **No multimodal** — image and audio inputs are not supported.
-- **Tool calling** — basic function calling works; edge cases with multi-step agentic loops may need manual testing.
-- **Rate limits** — subject to your Augment account tier.
+- **Token counting** — Augment does not expose exact token counts.
+- **Rate limits** — Subject to your Augment account tier.
 
 ## Troubleshooting
 

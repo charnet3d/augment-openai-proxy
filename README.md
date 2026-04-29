@@ -24,7 +24,7 @@ Copy `.env.example` to `.env` and set your values:
 ```env
 PORT=7888
 HOST=localhost
-AUGMENT_API_KEY=
+AUGMENT_API_TOKEN=
 AUGMENT_API_URL=
 ```
 
@@ -32,8 +32,8 @@ AUGMENT_API_URL=
 |---|---|---|
 | `PORT` | No | Server port (default: `7888`) |
 | `HOST` | No | Bind address (default: `localhost`) |
-| `AUGMENT_API_KEY` | No | API key for authentication. Falls back to `auggie login` session if omitted. |
-| `AUGMENT_API_URL` | No | Tenant-specific API URL. Required when `AUGMENT_API_KEY` is set. |
+| `AUGMENT_API_TOKEN` | No | API token for authentication. Falls back to `auggie login` session if omitted. |
+| `AUGMENT_API_URL` | No | Tenant-specific API URL. Required when `AUGMENT_API_TOKEN` is set. |
 
 ## Usage
 
@@ -153,7 +153,7 @@ Tool calling (function calling) is supported via the Augment SDK:
 
 | Problem | Fix |
 |---|---|
-| `401 Unauthorized` or auth errors | Run `auggie login` and re-authenticate, or set `AUGMENT_API_KEY` and `AUGMENT_API_URL` in `.env`. |
+| `401 Unauthorized` or auth errors | Run `auggie login` and re-authenticate, or set `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in `.env`. |
 | `model not found` | Check the model name — use `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-1`, etc. See your Augment dashboard for available models. |
 | Proxy won't start | Verify `PORT` is not already in use: `netstat -ano \| findstr :7888` |
 | Streaming hangs | Ensure `stream: true` is set in the request body and the client supports SSE. |

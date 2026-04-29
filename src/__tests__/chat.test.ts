@@ -8,8 +8,11 @@ const mockDoStream = vi.fn();
 
 // Use a class-based mock so it works with `new AugmentLanguageModel(...)`
 class MockAugmentLanguageModel {
-  constructor(_modelId: string, _options: object) {
-    // Track constructor calls if needed
+  specificationVersion = "v2" as const;
+  provider = "test-provider";
+  modelId: string;
+  constructor(modelId: string, _options: object) {
+    this.modelId = modelId;
   }
   doGenerate = mockDoGenerate;
   doStream = mockDoStream;
@@ -63,7 +66,7 @@ describe("chat route", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-4",
+          model: "llama-2",
           messages: [{ role: "user", content: "hello" }],
         }),
       });
@@ -72,7 +75,7 @@ describe("chat route", () => {
       const body: any = await response.json();
 
       expect(response.status).toBe(404);
-      expect(body.error.message).toContain("gpt-4");
+      expect(body.error.message).toContain("llama-2");
       expect(body.error.type).toBe("invalid_request_error");
     });
 
@@ -140,6 +143,7 @@ describe("chat route", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "Hello from Claude!" }],
         finishReason: "stop",
+        usage: { inputTokens: 5, outputTokens: 3 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -192,6 +196,7 @@ describe("chat route", () => {
           { type: "tool-call", toolCallId: "call_123", toolName: "getWeather", input: { city: "NYC" } },
         ],
         finishReason: "tool-calls",
+        usage: { inputTokens: 7, outputTokens: 4 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -220,6 +225,7 @@ describe("chat route", () => {
           { type: "text", text: "world!" },
         ],
         finishReason: "stop",
+        usage: { inputTokens: 4, outputTokens: 3 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -269,6 +275,7 @@ describe("chat route", () => {
           },
         ],
         finishReason: "tool-calls",
+        usage: { inputTokens: 6, outputTokens: 4 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -291,14 +298,13 @@ describe("chat route", () => {
 
   describe("streaming response", () => {
     it("should return SSE stream with correct headers", async () => {
-      const mockReader = {
-        read: vi.fn().mockResolvedValue({ done: true, value: undefined }),
-        releaseLock: vi.fn(),
-      };
-
-      mockDoStream.mockResolvedValueOnce({
-        stream: { getReader: () => mockReader },
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } });
+          controller.close();
+        },
       });
+      mockDoStream.mockResolvedValueOnce({ stream });
 
       const req = new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -319,17 +325,17 @@ describe("chat route", () => {
     });
 
     it("should stream text-delta chunks in SSE format", async () => {
-      const mockReader = {
-        read: vi.fn()
-          .mockResolvedValueOnce({ done: false, value: { type: "text-delta", delta: "Hello" } })
-          .mockResolvedValueOnce({ done: false, value: { type: "text-delta", delta: " world" } })
-          .mockResolvedValueOnce({ done: true, value: undefined }),
-        releaseLock: vi.fn(),
-      };
-
-      mockDoStream.mockResolvedValueOnce({
-        stream: { getReader: () => mockReader },
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "Hello" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: " world" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 2 } });
+          controller.close();
+        },
       });
+      mockDoStream.mockResolvedValueOnce({ stream });
 
       const req = new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -360,14 +366,12 @@ describe("chat route", () => {
     });
 
     it("should handle streaming errors gracefully", async () => {
-      const mockReader = {
-        read: vi.fn().mockRejectedValue(new Error("Stream interrupted")),
-        releaseLock: vi.fn(),
-      };
-
-      mockDoStream.mockResolvedValueOnce({
-        stream: { getReader: () => mockReader },
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error("Stream interrupted"));
+        },
       });
+      mockDoStream.mockResolvedValueOnce({ stream });
 
       const req = new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -410,10 +414,24 @@ describe("chat route", () => {
       });
 
       const response = await app.fetch(req);
-      const body: any = await response.json();
+      // AI SDK v5 surfaces doStream rejections through the stream, so the
+      // response is still 200 SSE with the error reported in-band.
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
 
-      expect(response.status).toBe(500);
-      expect(body.error.message).toBe("Failed to connect");
+      const reader = response.body?.getReader();
+      const chunks: string[] = [];
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(new TextDecoder().decode(value));
+        }
+      }
+      const fullContent = chunks.join("");
+      expect(fullContent).toContain("stream_error");
+      expect(fullContent).toContain("Failed to connect");
+      expect(fullContent).toContain("[DONE]");
     });
   });
 
@@ -422,6 +440,7 @@ describe("chat route", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "Done" }],
         finishReason: "stop",
+        usage: { inputTokens: 3, outputTokens: 1 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -442,6 +461,7 @@ describe("chat route", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "Truncated" }],
         finishReason: "length",
+        usage: { inputTokens: 3, outputTokens: 100 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -462,6 +482,7 @@ describe("chat route", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "Filtered" }],
         finishReason: "content-filter",
+        usage: { inputTokens: 3, outputTokens: 1 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -484,6 +505,7 @@ describe("chat route", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "OK" }],
         finishReason: "stop",
+        usage: { inputTokens: 4, outputTokens: 1 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -515,19 +537,17 @@ describe("chat route", () => {
 
   describe("streaming tool calls", () => {
     it("should stream tool-input-delta chunks", async () => {
-      const mockReader = {
-        read: vi.fn()
-          .mockResolvedValueOnce({
-            done: false,
-            value: { type: "tool-input-delta", delta: '{"city":"', id: "call_1" },
-          })
-          .mockResolvedValueOnce({ done: true, value: undefined }),
-        releaseLock: vi.fn(),
-      };
-
-      mockDoStream.mockResolvedValueOnce({
-        stream: { getReader: () => mockReader },
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "tool-input-start", id: "call_1", toolName: "getWeather" });
+          controller.enqueue({ type: "tool-input-delta", id: "call_1", delta: '{"city":"' });
+          controller.enqueue({ type: "tool-input-delta", id: "call_1", delta: 'NYC"}' });
+          controller.enqueue({ type: "tool-input-end", id: "call_1" });
+          controller.enqueue({ type: "finish", finishReason: "tool-calls", usage: { inputTokens: 5, outputTokens: 3 } });
+          controller.close();
+        },
       });
+      mockDoStream.mockResolvedValueOnce({ stream });
 
       const req = new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -553,6 +573,220 @@ describe("chat route", () => {
       const fullContent = chunks.join("");
       expect(fullContent).toContain("tool_calls");
       expect(fullContent).toContain("call_1");
+    });
+  });
+
+  describe("reasoning support", () => {
+    it("plumbs top-level reasoning_effort via providerOptions.augment", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning_effort: "high",
+        }),
+      });
+
+      const response = await app.fetch(req);
+      expect(response.status).toBe(200);
+
+      const callArgs = mockDoGenerate.mock.calls[0][0];
+      expect(callArgs.providerOptions).toEqual({
+        augment: { reasoningEffort: "high" },
+      });
+    });
+
+    it("plumbs Responses-API style reasoning {effort, summary} via providerOptions.augment", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning: { effort: "medium", summary: "concise" },
+        }),
+      });
+
+      const response = await app.fetch(req);
+      expect(response.status).toBe(200);
+
+      const callArgs = mockDoGenerate.mock.calls[0][0];
+      expect(callArgs.providerOptions).toEqual({
+        augment: { reasoningEffort: "medium", reasoningSummary: "concise" },
+      });
+    });
+
+    it("prefers nested reasoning.effort over top-level reasoning_effort", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          reasoning_effort: "low",
+          reasoning: { effort: "high" },
+        }),
+      });
+
+      await app.fetch(req);
+
+      const callArgs = mockDoGenerate.mock.calls[0][0];
+      expect(callArgs.providerOptions.augment.reasoningEffort).toBe("high");
+    });
+
+    it("omits providerOptions when no reasoning fields are present", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      await app.fetch(req);
+
+      const callArgs = mockDoGenerate.mock.calls[0][0];
+      expect(callArgs.providerOptions).toBeUndefined();
+    });
+
+    it("surfaces reasoning content in non-streaming message.reasoning_content", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [
+          { type: "reasoning", text: "Let me think step by step." },
+          { type: "reasoning", text: " The answer is 42." },
+          { type: "text", text: "42" },
+        ],
+        finishReason: "stop",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "what is 6*7?" }],
+        }),
+      });
+
+      const response = await app.fetch(req);
+      const body: any = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.choices[0].message.content).toBe("42");
+      expect(body.choices[0].message.reasoning_content).toBe(
+        "Let me think step by step. The answer is 42."
+      );
+    });
+
+    it("omits message.reasoning_content when the model produces none", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "hello" }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      const response = await app.fetch(req);
+      const body: any = await response.json();
+      expect(body.choices[0].message.reasoning_content).toBeUndefined();
+    });
+
+    it("emits delta.reasoning_content chunks for streaming reasoning-delta parts", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "reasoning-start", id: "r1" });
+          controller.enqueue({ type: "reasoning-delta", id: "r1", delta: "First " });
+          controller.enqueue({ type: "reasoning-delta", id: "r1", delta: "thought." });
+          controller.enqueue({ type: "reasoning-end", id: "r1" });
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "answer" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 3 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+          reasoning_effort: "high",
+        }),
+      });
+
+      const response = await app.fetch(req);
+      const reader = response.body?.getReader();
+      const chunks: string[] = [];
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(new TextDecoder().decode(value));
+        }
+      }
+      const fullContent = chunks.join("");
+
+      // Parse SSE data: lines into chunk objects
+      const sseChunks = fullContent
+        .split("\n\n")
+        .map((s) => s.replace(/^data: /, "").trim())
+        .filter((s) => s && s !== "[DONE]")
+        .map((s) => {
+          try { return JSON.parse(s); } catch { return null; }
+        })
+        .filter((x): x is any => x !== null);
+
+      const reasoningChunks = sseChunks.filter(
+        (c) => typeof c.choices?.[0]?.delta?.reasoning_content === "string"
+      );
+      expect(reasoningChunks.length).toBe(2);
+      expect(reasoningChunks[0].choices[0].delta.reasoning_content).toBe("First ");
+      expect(reasoningChunks[1].choices[0].delta.reasoning_content).toBe("thought.");
+
+      // Streaming providerOptions should also have been plumbed.
+      const streamCallArgs = mockDoStream.mock.calls[0][0];
+      expect(streamCallArgs.providerOptions).toEqual({
+        augment: { reasoningEffort: "high" },
+      });
     });
   });
 });

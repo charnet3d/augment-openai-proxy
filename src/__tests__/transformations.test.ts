@@ -40,7 +40,7 @@ describe("transformMessages", () => {
     ]);
 
     expect(result).toEqual([
-      { role: "user", content: [{ type: "text", text: "Hello" }] },
+      { role: "user", content: "Hello" },
     ]);
   });
 
@@ -49,7 +49,7 @@ describe("transformMessages", () => {
       { role: "user", content: null },
     ]);
 
-    expect(result).toEqual([{ role: "user", content: [] }]);
+    expect(result).toEqual([{ role: "user", content: "" }]);
   });
 
   it("should transform system message as plain string content", () => {
@@ -78,7 +78,7 @@ describe("transformMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [{ type: "text", text: "I can help with that." }],
+        content: "I can help with that.",
       },
     ]);
   });
@@ -171,7 +171,7 @@ describe("transformMessages", () => {
     ]);
   });
 
-  it("should transform tool result message to assistant with tool-result part", () => {
+  it("should transform tool result message with tool-result part", () => {
     const result = transformMessages([
       {
         role: "tool",
@@ -183,7 +183,7 @@ describe("transformMessages", () => {
 
     expect(result).toEqual([
       {
-        role: "assistant",
+        role: "tool",
         content: [
           {
             type: "tool-result",
@@ -207,7 +207,7 @@ describe("transformMessages", () => {
 
     expect(result).toEqual([
       {
-        role: "assistant",
+        role: "tool",
         content: [
           {
             type: "tool-result",
@@ -246,10 +246,11 @@ describe("transformMessages", () => {
 
     expect(result).toHaveLength(5);
     expect(result[0]).toEqual({ role: "system", content: "You are an assistant." });
-    expect(result[1]).toEqual({ role: "user", content: [{ type: "text", text: "What's the weather in NYC?" }] });
+    expect(result[1]).toEqual({ role: "user", content: "What's the weather in NYC?" });
     expect((result[2] as any).content[0].type).toBe("tool-call");
+    expect((result[3] as any).role).toBe("tool");
     expect((result[3] as any).content[0].type).toBe("tool-result");
-    expect((result[4] as any).content[0]).toEqual({ type: "text", text: "It's 72°F in NYC." });
+    expect((result[4] as any).content).toBe("It's 72°F in NYC.");
   });
 });
 
@@ -262,7 +263,7 @@ describe("transformTools", () => {
     expect(transformTools(undefined)).toBeUndefined();
   });
 
-  it("should transform a single function tool", () => {
+  it("should transform a single function tool into a Record by name", () => {
     const result = transformTools([
       {
         type: "function",
@@ -275,19 +276,16 @@ describe("transformTools", () => {
           },
         },
       },
-    ]);
+    ]) as Record<string, any>;
 
-    expect(result).toEqual([
-      {
-        type: "function",
-        name: "getWeather",
-        description: "Get the weather",
-        inputSchema: {
-          type: "object",
-          properties: { city: { type: "string" } },
-        },
-      },
-    ]);
+    expect(result).toBeDefined();
+    expect(result["getWeather"]).toBeDefined();
+    expect(result["getWeather"].description).toBe("Get the weather");
+    // inputSchema is wrapped by jsonSchema() — check the inner JSON schema
+    expect(result["getWeather"].inputSchema.jsonSchema).toEqual({
+      type: "object",
+      properties: { city: { type: "string" } },
+    });
   });
 
   it("should handle tool without description", () => {
@@ -299,16 +297,12 @@ describe("transformTools", () => {
           parameters: {},
         },
       },
-    ]);
+    ]) as Record<string, any>;
 
-    expect(result).toEqual([
-      {
-        type: "function",
-        name: "simple",
-        description: undefined,
-        inputSchema: {},
-      },
-    ]);
+    expect(result).toBeDefined();
+    expect(result["simple"]).toBeDefined();
+    expect(result["simple"].description).toBeUndefined();
+    expect(result["simple"].inputSchema.jsonSchema).toEqual({});
   });
 
   it("should handle multiple tools", () => {
@@ -321,11 +315,12 @@ describe("transformTools", () => {
         type: "function",
         function: { name: "tool2", parameters: {} },
       },
-    ]);
+    ]) as Record<string, any>;
 
-    expect(result).toHaveLength(2);
-    expect(result![0]).toMatchObject({ name: "tool1" });
-    expect(result![1]).toMatchObject({ name: "tool2" });
+    expect(result).toBeDefined();
+    expect(result["tool1"]).toBeDefined();
+    expect(result["tool2"]).toBeDefined();
+    expect(Object.keys(result)).toHaveLength(2);
   });
 });
 
@@ -334,16 +329,16 @@ describe("transformToolChoice", () => {
     expect(transformToolChoice(undefined)).toBeUndefined();
   });
 
-  it("should transform 'none' to { type: 'none' }", () => {
-    expect(transformToolChoice("none")).toEqual({ type: "none" });
+  it("should pass through 'none' as a string", () => {
+    expect(transformToolChoice("none")).toBe("none");
   });
 
-  it("should transform 'auto' to { type: 'auto' }", () => {
-    expect(transformToolChoice("auto")).toEqual({ type: "auto" });
+  it("should pass through 'auto' as a string", () => {
+    expect(transformToolChoice("auto")).toBe("auto");
   });
 
-  it("should transform 'required' to { type: 'required' }", () => {
-    expect(transformToolChoice("required")).toEqual({ type: "required" });
+  it("should pass through 'required' as a string", () => {
+    expect(transformToolChoice("required")).toBe("required");
   });
 
   it("should transform object tool_choice with function name", () => {

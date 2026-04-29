@@ -3,8 +3,8 @@ import { listModels } from "../services/modelRegistry";
 
 const router = new Hono();
 
-router.get("/", (c) => {
-  return c.json(listModels());
+router.get("/", async (c) => {
+  return c.json(await listModels());
 });
 
 export default router;

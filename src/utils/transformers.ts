@@ -1,14 +1,51 @@
+import { jsonSchema } from "ai";
 import type {
   ChatCompletionRequest,
   ChatCompletionMessage,
   ChatCompletionResponse,
   ErrorResponse,
 } from "../types/openai";
-import type {
-  LanguageModelV2FunctionTool,
-  LanguageModelV2ToolChoice,
-  LanguageModelV2Message,
-} from "@ai-sdk/provider";
+
+// ---------------------------------------------------------------------------
+// Inline types that mirror the shapes expected by generateText / streamText
+// (avoids importing complex generic types from the ai package directly).
+// ---------------------------------------------------------------------------
+
+type AiTextPart = { type: "text"; text: string };
+type AiToolCallPart = {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+  // AI SDK v5 renamed `args` → `input`.
+  input: unknown;
+};
+type AiToolResultPart = {
+  type: "tool-result";
+  toolCallId: string;
+  toolName: string;
+  // AI SDK v5: structured output instead of a raw string.
+  output: { type: "text"; value: string } | { type: "json"; value: unknown };
+};
+
+export type CoreMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string | Array<AiTextPart | AiToolCallPart> }
+  | { role: "tool"; content: AiToolResultPart[] };
+
+export type CoreTool = {
+  description?: string;
+  // AI SDK v5 uses `inputSchema` (not `parameters`) to hold the JSON schema.
+  // The field must be wrapped with jsonSchema() so asSchema() can resolve it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  inputSchema: ReturnType<typeof jsonSchema<any>>;
+};
+
+export type CoreToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "tool"; toolName: string };
 
 /**
  * Parse JSON safely, falling back to the original string on failure.
@@ -22,109 +59,113 @@ export function safeJsonParse(input: string): unknown {
 }
 
 /**
- * Transform OpenAI messages to AI SDK LanguageModelV2Message format.
+ * Transform OpenAI messages to AI SDK CoreMessage format.
+ *
+ * - tool role messages need the toolName resolved from preceding assistant
+ *   messages (OpenAI omits it; the AI SDK requires it).
  */
-export function transformMessages(
-  messages: ChatCompletionMessage[]
-): LanguageModelV2Message[] {
-  return messages.map((msg) => {
-    const content: Array<{ type: "text"; text: string }> = msg.content
-      ? [{ type: "text" as const, text: msg.content }]
-      : [];
+export function transformMessages(messages: ChatCompletionMessage[]): CoreMessage[] {
+  // Pre-scan: build tool_call_id → toolName lookup
+  const toolCallIdToName = new Map<string, string>();
+  for (const msg of messages) {
+    if (msg.role === "assistant" && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        toolCallIdToName.set(tc.id, tc.function.name);
+      }
+    }
+  }
 
+  return messages.flatMap((msg): CoreMessage[] => {
     switch (msg.role) {
       case "system":
-        return { role: "system" as const, content: msg.content || "" };
+        return [{ role: "system", content: msg.content ?? "" }];
 
       case "user":
-        return { role: "user" as const, content };
+        return [{ role: "user", content: msg.content ?? "" }];
 
       case "assistant": {
-        const parts: Array<
-          | { type: "text"; text: string }
-          | {
-              type: "tool-call";
-              toolCallId: string;
-              toolName: string;
-              input: unknown;
-            }
-        > = [];
-
+        if (!msg.tool_calls?.length) {
+          return [{ role: "assistant", content: msg.content ?? "" }];
+        }
+        const parts: Array<AiTextPart | AiToolCallPart> = [];
         if (msg.content) {
-          parts.push({ type: "text" as const, text: msg.content });
+          parts.push({ type: "text", text: msg.content });
         }
-
-        if (msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            parts.push({
-              type: "tool-call" as const,
-              toolCallId: tc.id,
-              toolName: tc.function.name,
-              input:
-                typeof tc.function.arguments === "string"
-                  ? safeJsonParse(tc.function.arguments)
-                  : tc.function.arguments,
-            });
-          }
+        for (const tc of msg.tool_calls) {
+          parts.push({
+            type: "tool-call",
+            toolCallId: tc.id,
+            toolName: tc.function.name,
+            input:
+              typeof tc.function.arguments === "string"
+                ? safeJsonParse(tc.function.arguments)
+                : tc.function.arguments,
+          });
         }
-
-        return { role: "assistant" as const, content: parts };
+        return [{ role: "assistant", content: parts }];
       }
 
       case "tool":
-        return {
-          role: "assistant" as const,
-          content: [
-            {
-              type: "tool-result" as const,
-              toolCallId: msg.tool_call_id ?? "",
-              toolName: msg.name ?? "",
-              output: { type: "text" as const, value: msg.content ?? "" },
-            },
-          ],
-        };
+        return [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: msg.tool_call_id ?? "",
+                // Resolve toolName from the preceding assistant message
+                toolName:
+                  toolCallIdToName.get(msg.tool_call_id ?? "") ??
+                  msg.name ??
+                  "unknown",
+                output: { type: "text", value: msg.content ?? "" },
+              },
+            ],
+          },
+        ];
 
       default:
-        return { role: "user" as const, content };
+        return [{ role: "user", content: msg.content ?? "" }];
     }
   });
 }
 
 /**
- * Transform OpenAI tools to AI SDK LanguageModelV2FunctionTool format.
+ * Transform OpenAI tools to a Record<name, CoreTool> for generateText / streamText.
+ * Tools have no `execute` — we are a proxy, tool execution happens on the client.
  */
 export function transformTools(
   tools?: ChatCompletionRequest["tools"]
-): LanguageModelV2FunctionTool[] | undefined {
-  if (!tools || tools.length === 0) return undefined;
+): Record<string, CoreTool> | undefined {
+  if (!tools?.length) return undefined;
 
-  return tools
-    .filter(
-      (t): t is Extract<ChatCompletionRequest["tools"], any[]>[number] & {
-        type: "function";
-      } => t.type === "function"
-    )
-    .map((t) => ({
-      type: "function" as const,
-      name: t.function.name,
-      description: t.function.description,
-      inputSchema: t.function.parameters as any,
-    }));
+  const result: Record<string, CoreTool> = {};
+  for (const t of tools) {
+    if (t.type === "function") {
+      result[t.function.name] = {
+        description: t.function.description,
+        // AI SDK v5: use `inputSchema` (not `parameters`). Must be wrapped
+        // with jsonSchema() so the SDK resolves it to the raw JSON Schema.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        inputSchema: jsonSchema(t.function.parameters as any),
+      };
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /**
- * Transform OpenAI tool_choice to AI SDK LanguageModelV2ToolChoice.
+ * Transform OpenAI tool_choice to AI SDK CoreToolChoice.
  */
 export function transformToolChoice(
   toolChoice?: ChatCompletionRequest["tool_choice"]
-): LanguageModelV2ToolChoice | undefined {
+): CoreToolChoice | undefined {
   if (!toolChoice) return undefined;
-
-  if (toolChoice === "none") return { type: "none" as const };
-  if (toolChoice === "auto") return { type: "auto" as const };
-  if (toolChoice === "required") return { type: "required" as const };
+  if (toolChoice === "none") return "none";
+  if (toolChoice === "auto") return "auto";
+  if (toolChoice === "required") return "required";
   if (typeof toolChoice === "object" && toolChoice.type === "function") {
-    return { type: "tool" as const, toolName: toolChoice.function.name };
+    return { type: "tool", toolName: toolChoice.function.name };
   }
   return undefined;
 }

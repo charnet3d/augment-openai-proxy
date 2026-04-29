@@ -14,8 +14,11 @@ const mockDoStream = vi.fn();
 
 // Use a class-based mock so it works with `new AugmentLanguageModel(...)`
 class MockAugmentLanguageModel {
-  constructor(_modelId: string, _options: object) {
-    // Track constructor calls if needed
+  specificationVersion = "v2" as const;
+  provider = "test-provider";
+  modelId: string;
+  constructor(modelId: string, _options: object) {
+    this.modelId = modelId;
   }
   doGenerate = mockDoGenerate;
   doStream = mockDoStream;
@@ -82,7 +85,7 @@ describe("integration — full request flow", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-4-turbo",
+          model: "llama-2-turbo",
           messages: [{ role: "user", content: "hi" }],
         }),
       });
@@ -92,13 +95,14 @@ describe("integration — full request flow", () => {
 
       const body: any = await response.json();
       expect(body.error.type).toBe("invalid_request_error");
-      expect(body.error.message).toContain("gpt-4-turbo");
+      expect(body.error.message).toContain("llama-2-turbo");
     });
 
     it("should accept claude- prefixed models not in registry (passthrough to SDK)", async () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "OK" }],
         finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -120,6 +124,7 @@ describe("integration — full request flow", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "Response" }],
         finishReason: "stop",
+        usage: { inputTokens: 5, outputTokens: 2 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -143,6 +148,7 @@ describe("integration — full request flow", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "I got the weather data." }],
         finishReason: "stop",
+        usage: { inputTokens: 12, outputTokens: 6 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -183,6 +189,7 @@ describe("integration — full request flow", () => {
       mockDoGenerate.mockResolvedValueOnce({
         content: [{ type: "text", text: "OK" }],
         finishReason: "stop",
+        usage: { inputTokens: 8, outputTokens: 1 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -220,14 +227,16 @@ describe("integration — full request flow", () => {
 
   describe("A5: SSE streaming format", () => {
     it("should send proper SSE format with initial chunk and [DONE]", async () => {
-      const mockReader = {
-        read: vi.fn()
-          .mockResolvedValueOnce({ done: false, value: { type: "text-delta", delta: "Hello" } })
-          .mockResolvedValueOnce({ done: true, value: undefined }),
-        releaseLock: vi.fn(),
-      };
-
-      mockDoStream.mockResolvedValueOnce({ stream: { getReader: () => mockReader } });
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "Hello" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
 
       const req = new Request("http://localhost/v1/chat/completions", {
         method: "POST",
@@ -355,6 +364,7 @@ describe("integration — full request flow", () => {
           },
         ],
         finishReason: "tool-calls",
+        usage: { inputTokens: 6, outputTokens: 4 },
       });
 
       const req = new Request("http://localhost/v1/chat/completions", {
@@ -392,6 +402,177 @@ describe("integration — full request flow", () => {
         expect(typeof model.created).toBe("number");
         expect(model.owned_by).toBe("augment");
       }
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // End-to-end user scenarios
+  // These tests simulate realistic client workflows from first
+  // request to last byte, verifying that every layer (routing,
+  // transformation, streaming) cooperates correctly.
+  // ─────────────────────────────────────────────────────────────
+
+  describe("end-to-end: user fetches the available model list", () => {
+    it("returns HTTP 200 with a non-empty OpenAI-formatted model list", async () => {
+      const response = await modelsApp.fetch(
+        new Request("http://localhost/v1/models")
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("application/json");
+
+      const body: any = await response.json();
+
+      // Top-level envelope
+      expect(body.object).toBe("list");
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data.length).toBeGreaterThan(0);
+
+      // Every model entry must have all required fields
+      for (const model of body.data) {
+        expect(typeof model.id).toBe("string");
+        expect(model.id.length).toBeGreaterThan(0);
+        expect(model.object).toBe("model");
+        expect(typeof model.created).toBe("number");
+        expect(model.created).toBeGreaterThan(0);
+        expect(model.owned_by).toBe("augment");
+      }
+    });
+  });
+
+  describe("end-to-end: user sends a simple chat message", () => {
+    it("returns a complete, correctly shaped chat.completion response", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "Paris is the capital of France." }],
+        finishReason: "stop",
+        usage: { inputTokens: 12, outputTokens: 8 },
+      });
+
+      const response = await chatApp.fetch(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-5",
+            messages: [
+              { role: "user", content: "What is the capital of France?" },
+            ],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("application/json");
+
+      const body: any = await response.json();
+
+      // Response envelope
+      expect(body.id).toMatch(/^chatcmpl-/);
+      expect(body.object).toBe("chat.completion");
+      expect(body.model).toBe("claude-sonnet-4-5");
+      expect(typeof body.created).toBe("number");
+      expect(body.created).toBeGreaterThan(0);
+
+      // Assistant message
+      expect(body.choices).toHaveLength(1);
+      const choice = body.choices[0];
+      expect(choice.index).toBe(0);
+      expect(choice.message.role).toBe("assistant");
+      expect(choice.message.content).toBe("Paris is the capital of France.");
+      expect(choice.finish_reason).toBe("stop");
+
+      // Token usage
+      expect(body.usage).toMatchObject({
+        prompt_tokens: 12,
+        completion_tokens: 8,
+        total_tokens: 20,
+      });
+
+      // Augment-specific fingerprint
+      expect(body.system_fingerprint).toBe("augment_oai_proxy");
+    });
+  });
+
+  describe("end-to-end: user streams a response", () => {
+    it("delivers text as parseable SSE chunks and closes with [DONE]", async () => {
+      const words = ["The ", "answer ", "is ", "42."];
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          for (const word of words) {
+            controller.enqueue({ type: "text-delta", id: "t1", delta: word });
+          }
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 5, outputTokens: 4 } });
+          controller.close();
+        },
+      });
+
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const response = await chatApp.fetch(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-5",
+            messages: [
+              { role: "user", content: "What is the meaning of life?" },
+            ],
+            stream: true,
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      // Consume the full SSE stream into a string
+      const streamReader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let rawSse = "";
+      while (true) {
+        const { done, value } = await streamReader.read();
+        if (done) break;
+        rawSse += decoder.decode(value, { stream: true });
+      }
+
+      // Split on SSE double-newline separator, drop blanks
+      const events = rawSse
+        .split("\n\n")
+        .map((e) => e.trim())
+        .filter(Boolean);
+
+      // Stream must terminate with [DONE]
+      expect(events.at(-1)).toBe("data: [DONE]");
+
+      // Parse every event except the terminal [DONE]
+      const dataEvents = events.slice(0, -1);
+      const chunks = dataEvents.map((e) => {
+        expect(e.startsWith("data: ")).toBe(true);
+        return JSON.parse(e.slice("data: ".length));
+      });
+
+      // Every chunk must carry the standard streaming envelope
+      for (const chunk of chunks) {
+        expect(chunk.id).toMatch(/^chatcmpl-/);
+        expect(chunk.object).toBe("chat.completion.chunk");
+        expect(chunk.model).toBe("claude-sonnet-4-5");
+        expect(typeof chunk.created).toBe("number");
+        expect(Array.isArray(chunk.choices)).toBe(true);
+      }
+
+      // First chunk must establish the assistant role
+      expect(chunks[0].choices[0].delta).toMatchObject({ role: "assistant" });
+
+      // Reconstruct the full text from content deltas (skip the role chunk)
+      const reconstructed = chunks
+        .slice(1)
+        .map((c: any) => c.choices[0].delta.content ?? "")
+        .join("");
+
+      expect(reconstructed).toBe("The answer is 42.");
     });
   });
 });

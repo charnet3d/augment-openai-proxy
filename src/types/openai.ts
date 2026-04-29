@@ -1,11 +1,28 @@
 // OpenAI-compatible request/response types
 
+/**
+ * Reasoning effort knob (matches OpenAI Responses / Chat Completions API).
+ * `minimal` is GPT-5+; `low|medium|high` are also accepted by older o-series.
+ */
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
+
+/**
+ * Reasoning summary mode (Responses API parameter).
+ */
+export type ReasoningSummary = "auto" | "concise" | "detailed";
+
 export interface ChatCompletionMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
   tool_calls?: ChatCompletionToolCall[];
   tool_call_id?: string;
   name?: string;
+  /**
+   * Reasoning text surfaced by reasoning-capable models. Plain string,
+   * matching the de-facto convention used by DeepSeek, OpenRouter, and the
+   * OpenAI-compatible client ecosystem (Open WebUI, aider, cline, litellm).
+   */
+  reasoning_content?: string;
 }
 
 export interface ChatCompletionToolCall {
@@ -42,6 +59,20 @@ export interface ChatCompletionRequest {
   tools?: ChatCompletionFunctionTool[];
   tool_choice?: ChatCompletionToolChoice;
   stop?: string | string[];
+  /**
+   * Top-level reasoning effort, accepted by the OpenAI Chat Completions API
+   * for reasoning-capable models (o-series, gpt-5*).
+   */
+  reasoning_effort?: ReasoningEffort;
+  /**
+   * Responses-API-style reasoning configuration. Either field is optional.
+   * When both `reasoning_effort` and `reasoning.effort` are set, the nested
+   * value wins.
+   */
+  reasoning?: {
+    effort?: ReasoningEffort;
+    summary?: ReasoningSummary;
+  };
 }
 
 export interface ChatCompletionChoice {
@@ -70,6 +101,12 @@ export interface ChatCompletionChunkDelta {
   role?: "system" | "user" | "assistant" | "tool";
   content?: string | null;
   tool_calls?: ChatCompletionToolCallChunk[];
+  /**
+   * Incremental reasoning text fragment for reasoning-capable models. Plain
+   * string, matching the DeepSeek/OpenRouter convention consumed by Open
+   * WebUI and other OpenAI-compatible clients.
+   */
+  reasoning_content?: string;
 }
 
 export interface ChatCompletionToolCallChunk {

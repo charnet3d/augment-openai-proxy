@@ -1,3 +1,4 @@
+import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -29,6 +30,7 @@ app.route("/v1/models", modelsRouter);
 
 // 404 handler
 app.notFound((c) => {
+  console.warn(`[router] 404 no route matched: ${c.req.method} ${c.req.url}`);
   return c.json(
     {
       error: {
@@ -47,45 +49,14 @@ async function main() {
   const credentialsValid = await validateCredentials();
   if (!credentialsValid) {
     console.warn(
-      "[WARN] No Augment credentials found. Run 'auggie login' or set AUGMENT_API_KEY/AUGMENT_API_URL."
+      "[WARN] No Augment credentials found. Run 'auggie login' or set AUGMENT_API_TOKEN/AUGMENT_API_URL."
     );
   }
 
-  const http = await import("node:http");
-
-  const httpServer = http.createServer(async (req, res) => {
-    const response = await app.fetch(req as any, {} as any);
-    res.writeHead(response.status, Object.fromEntries(response.headers));
-    if (response.body) {
-      const reader = response.body.getReader();
-      const pump = () => {
-        reader
-          .read()
-          .then(({ done, value }) => {
-            if (done) {
-              res.end();
-              return;
-            }
-            try {
-              res.write(value);
-              pump();
-            } catch {
-              res.end();
-            }
-          })
-          .catch(() => {
-            res.end();
-          });
-      };
-      pump();
-    } else {
-      res.end();
-    }
-  });
-
-  httpServer.listen(PORT, HOST, () => {
-    printBanner();
-  });
+  const httpServer = serve(
+    { fetch: app.fetch, port: PORT, hostname: HOST },
+    () => printBanner()
+  );
 
   // Graceful shutdown
   const shutdown = () => {
@@ -102,13 +73,13 @@ async function main() {
 
 function printBanner() {
   console.log("");
-  console.log("╔══════════════════════════════════════╗");
-  console.log("║     Augment OAI Proxy is running     ║");
-  console.log("╠══════════════════════════════════════╣");
-  console.log(`║  URL:  http://${HOST}:${PORT}           ║`);
-  console.log(`║  Chat: http://${HOST}:${PORT}/v1/chat/completions║`);
-  console.log(`║  Models: http://${HOST}:${PORT}/v1/models        ║`);
-  console.log("╚══════════════════════════════════════╝");
+  console.log("╔══════════════════════════════════════════════════════════════════════════════╗");
+  console.log("║     Augment OAI Proxy is running                                             ║");
+  console.log("╠══════════════════════════════════════════════════════════════════════════════╣");
+  console.log(`║  URL:  http://${HOST}:${PORT}`);
+  console.log(`║  Chat: http://${HOST}:${PORT}/v1/chat/completions`);
+  console.log(`║  Models: http://${HOST}:${PORT}/v1/models`);
+  console.log("╚══════════════════════════════════════════════════════════════════════════════╝");
   console.log("");
 }
 

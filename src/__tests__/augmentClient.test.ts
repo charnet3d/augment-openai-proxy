@@ -21,7 +21,6 @@ vi.mock("@augmentcode/auggie-sdk", () => ({
 }));
 
 describe("augmentClient", () => {
-  let resolveModelId: (id: string) => string;
   let validateCredentials: () => Promise<boolean>;
   let getAugmentModel: (id: string) => Promise<any>;
 
@@ -37,31 +36,8 @@ describe("augmentClient", () => {
 
     // Re-import after clearing modules
     const augmentClient = await import("../services/augmentClient");
-    resolveModelId = augmentClient.resolveModelId;
     validateCredentials = augmentClient.validateCredentials;
     getAugmentModel = augmentClient.getAugmentModel;
-  });
-
-  describe("resolveModelId", () => {
-    it("should normalize model ID to lowercase and trim whitespace", () => {
-      expect(resolveModelId("  CLAUDE-SONNET-4-5  ")).toBe("claude-sonnet-4-5");
-    });
-
-    it("should return exact known model ID when matched case-insensitively", () => {
-      expect(resolveModelId("Claude-Sonnet-4-5")).toBe("claude-sonnet-4-5");
-    });
-
-    it("should return original model ID for unknown models (passthrough)", () => {
-      expect(resolveModelId("unknown-model")).toBe("unknown-model");
-    });
-
-    it("should handle empty string", () => {
-      expect(resolveModelId("")).toBe("");
-    });
-
-    it("should preserve original casing for passthrough models", () => {
-      expect(resolveModelId("My-Custom-Model")).toBe("My-Custom-Model");
-    });
   });
 
   describe("validateCredentials", () => {
@@ -114,13 +90,13 @@ describe("augmentClient", () => {
       });
     });
 
-    it("should normalize model ID before creating model", async () => {
+    it("should pass model ID through to the SDK unchanged", async () => {
       mockResolveCredentials.mockResolvedValue({
         apiKey: "test-key",
         apiUrl: "https://api.test.com",
       });
 
-      await getAugmentModel("  CLAUDE-SONNET-4-5  ");
+      await getAugmentModel("claude-sonnet-4-5");
 
       expect(constructorCalls[0][0]).toBe("claude-sonnet-4-5");
     });

@@ -145,7 +145,8 @@ Tool calling (function calling) is supported via the Augment SDK:
 ## Known Limitations
 
 - **Token counting** — Augment does not expose exact token counts.
-- **Rate limits** — Subject to your Augment account tier.
+- **No multimodal** — image and audio inputs are not supported.
+- **Rate limits** — subject to your Augment account tier.
 
 ## Troubleshooting
 

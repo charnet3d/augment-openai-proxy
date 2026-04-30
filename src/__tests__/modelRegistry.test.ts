@@ -294,6 +294,20 @@ describe("resolveEffortModelId", () => {
     expect(await resolveEffortModelId("claude-opus-4-7", "minimal")).toBe("claude-opus-4-7-medium");
   });
 
+  it("maps OpenAI 'xhigh' to the matching Augment tier when advertised", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    // opus4.7 advertises xHigh → exact match.
+    expect(await resolveEffortModelId("claude-opus-4-7", "xhigh")).toBe("claude-opus-4-7-xhigh");
+    // opus4.6 has no xHigh → snap to Max (closest to "xhigh").
+    expect(await resolveEffortModelId("claude-opus-4-6", "xhigh")).toBe("claude-opus-4-6-max");
+  });
+
+  it("returns undefined for OpenAI 'none' so the base model is used", async () => {
+    const { resolveEffortModelId } = await import("../services/modelRegistry");
+    expect(await resolveEffortModelId("claude-opus-4-6", "none")).toBeUndefined();
+    expect(await resolveEffortModelId("claude-opus-4-7", "none")).toBeUndefined();
+  });
+
   it("returns undefined when the base model has no effortLevels", async () => {
     const { resolveEffortModelId } = await import("../services/modelRegistry");
     expect(await resolveEffortModelId("claude-haiku-4-5", "high")).toBeUndefined();

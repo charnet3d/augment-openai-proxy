@@ -196,10 +196,13 @@ export async function isModelAvailable(modelId: string): Promise<boolean> {
  * `undefined` when no rewrite should happen, i.e. when:
  *   - the model is not a known base in the registry, or
  *   - the model has no advertised effort levels, or
+ *   - the requested effort is "none" (caller should use the base model), or
  *   - no reasonable level mapping exists.
  *
  * Mapping rules:
+ *   - "none" → undefined (forward to the base model, no depth suffix).
  *   - "minimal" is treated as the lowest level (Augment has no minimal tier).
+ *   - "xhigh" maps directly to Augment's xhigh tier when advertised.
  *   - Exact (case-insensitive) match wins.
  *   - Otherwise snap to the closest level by index in ORDERED_EFFORT_LEVELS.
  */
@@ -207,6 +210,7 @@ export async function resolveEffortModelId(
   modelId: string,
   effort: ReasoningEffort
 ): Promise<string | undefined> {
+  if (effort === "none") return undefined;
   const entries = await getModelEntries();
   const entry = entries.find((e) => e.baseId === modelId);
   if (!entry || entry.effortLevels.length === 0) return undefined;

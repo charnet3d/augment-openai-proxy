@@ -2,9 +2,10 @@
 
 /**
  * Reasoning effort knob (matches OpenAI Responses / Chat Completions API).
- * `minimal` is GPT-5+; `low|medium|high` are also accepted by older o-series.
+ * Per the OpenAI reasoning guide, supported values are model-dependent and
+ * can include `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
  */
-export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /**
  * Reasoning summary mode (Responses API parameter).

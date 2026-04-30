@@ -154,9 +154,10 @@ both forms:
    own entry in `GET /v1/models`. Pass it as `model` and you get that
    reasoning depth — e.g. `"model": "claude-opus-4-7-high"`.
 2. **OpenAI `reasoning_effort` on the base ID.** Send the base model with a
-   standard OpenAI `reasoning_effort` (`minimal` | `low` | `medium` | `high`)
-   and the proxy rewrites the request to the suffixed backend ID before
-   forwarding. The response echoes the original (base) `model` ID.
+   standard OpenAI `reasoning_effort` (`none` | `minimal` | `low` | `medium`
+   | `high` | `xhigh`) and the proxy rewrites the request to the suffixed
+   backend ID before forwarding. The response echoes the original (base)
+   `model` ID.
 
 ```json
 {
@@ -170,11 +171,13 @@ The Responses-API nested form is also accepted:
 `"reasoning": { "effort": "medium", "summary": "concise" }`. When both forms
 are set, the nested one wins.
 
-**Mapping rules.** Exact (case-insensitive) matches win. `minimal` is treated
-as `low` (Augment has no minimal tier). Otherwise the requested level snaps
-to the closest advertised level by index in `["low","medium","high","max",
-"xhigh"]` — so requesting `high` on a model that only advertises
-`["low","medium","max"]` resolves to `max`.
+**Mapping rules.** Exact (case-insensitive) matches win. `none` is forwarded
+to the base model with no depth suffix (use it to opt out of reasoning).
+`minimal` is treated as `low` (Augment has no minimal tier). `xhigh` matches
+Augment's `xhigh` tier directly. Otherwise the requested level snaps to the
+closest advertised level by index in `["low","medium","high","max","xhigh"]`
+— so requesting `high` on a model that only advertises `["low","medium",
+"max"]` resolves to `max`, and `xhigh` on a model without it snaps to `max`.
 
 If a model has no advertised effort levels, `reasoning_effort` is forwarded
 to the SDK as a `providerOptions.augment.reasoningEffort` hint and the

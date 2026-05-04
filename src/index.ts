@@ -19,7 +19,7 @@ app.use("*", logger());
 app.get("/", (c) => {
   return c.json({
     status: "ok",
-    service: "augment-oai-proxy",
+    service: "augment-open-proxy",
     version: "1.0.0",
   });
 });
@@ -74,7 +74,7 @@ async function main() {
 function printBanner() {
   console.log("");
   console.log("╔══════════════════════════════════════════════════════════════════════════════╗");
-  console.log("║     Augment OAI Proxy is running                                             ║");
+  console.log("║     Augment Open Proxy is running                                            ║");
   console.log("╠══════════════════════════════════════════════════════════════════════════════╣");
   console.log(`║  URL:  http://${HOST}:${PORT}`);
   console.log(`║  Chat: http://${HOST}:${PORT}/v1/chat/completions`);

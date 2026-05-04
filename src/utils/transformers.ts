@@ -287,7 +287,7 @@ export function buildResponse(
       completion_tokens: 0,
       total_tokens: 0,
     },
-    system_fingerprint: "augment_oai_proxy",
+    system_fingerprint: "augment_open_proxy",
   };
 }
 

@@ -86,7 +86,7 @@ describe("augmentClient", () => {
       expect(constructorCalls[0][1]).toMatchObject({
         apiKey: "test-key",
         apiUrl: "https://api.test.com",
-        clientUserAgent: "augment-oai-proxy/1.0.0",
+        clientUserAgent: "augment-open-proxy/1.0.0",
       });
     });
 

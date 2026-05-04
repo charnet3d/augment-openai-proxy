@@ -40,7 +40,7 @@ for (const base of BASES) {
     const model = new AugmentLanguageModel(modelId, {
       apiKey: creds.apiKey,
       apiUrl: creds.apiUrl,
-      clientUserAgent: "augment-oai-proxy-probe/1.0.0",
+      clientUserAgent: "augment-open-proxy-probe/1.0.0",
     });
     try {
       const r = await generateText({

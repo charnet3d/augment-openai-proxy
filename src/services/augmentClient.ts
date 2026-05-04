@@ -27,7 +27,7 @@ export async function getAugmentModel(modelId: string): Promise<AugmentLanguageM
     apiKey: creds.apiKey,
     apiUrl: creds.apiUrl,
     debug: process.env.DEBUG === "true",
-    clientUserAgent: "augment-oai-proxy/1.0.0",
+    clientUserAgent: "augment-open-proxy/1.0.0",
   });
 
   // CHAT mode is required for two independent reasons:

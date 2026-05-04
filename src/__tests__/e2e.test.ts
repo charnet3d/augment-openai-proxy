@@ -26,7 +26,7 @@ import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { expandShortName } from "../services/modelRegistry";
+import { expandShortName, expandModelEntry, getEffortDisabledBaseIds } from "../services/modelRegistry";
 
 const execFileAsync = promisify(execFile);
 
@@ -133,14 +133,26 @@ describeE2E("e2e — real Augment API", () => {
       expect(cliResult.ok, `auggie CLI failed: ${cliResult.error}`).toBe(true);
 
       const cliData = JSON.parse(cliResult.stdout.trim()) as {
-        models?: Array<{ shortName?: string }>;
+        models?: Array<{ shortName?: string; effortLevels?: unknown }>;
       };
+      // Mirror the registry's fetchModelEntries logic exactly: expand short
+      // names, parse effortLevels, honour AUGMENT_DISABLE_EFFORT_MODELS, then
+      // flatten base + suffixed variants so both sides are comparable.
+      const disabled = getEffortDisabledBaseIds();
       const cliIds = (cliData.models ?? [])
-        .map((m) => m.shortName)
-        .filter((s): s is string => typeof s === "string" && s.length > 0)
-        // The proxy expands short names to canonical backend IDs; apply the
-        // same transformation here so both sides are comparable.
-        .map(expandShortName)
+        .filter((m): m is { shortName: string; effortLevels?: unknown } =>
+          typeof m.shortName === "string" && m.shortName.length > 0
+        )
+        .flatMap((m) => {
+          const baseId = expandShortName(m.shortName);
+          const advertised = Array.isArray(m.effortLevels)
+            ? m.effortLevels
+                .filter((l): l is string => typeof l === "string" && l.length > 0)
+                .map((l) => l.toLowerCase())
+            : [];
+          const effortLevels = disabled.has(baseId) ? [] : advertised;
+          return expandModelEntry({ baseId, effortLevels });
+        })
         .sort((a, b) => a.localeCompare(b));
 
       // 2. Fetch via the proxy.
@@ -207,7 +219,7 @@ describeE2E("e2e — real Augment API", () => {
       expect(body.object).toBe("chat.completion");
       expect(body.model).toBe(testModelId);
       expect(typeof body.created).toBe("number");
-      expect(body.system_fingerprint).toBe("augment_oai_proxy");
+      expect(body.system_fingerprint).toBe("augment_open_proxy");
 
       // Assistant message
       expect(body.choices).toHaveLength(1);

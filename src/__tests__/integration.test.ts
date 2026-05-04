@@ -29,6 +29,14 @@ vi.mock("@augmentcode/auggie-sdk", () => ({
   AugmentLanguageModel: MockAugmentLanguageModel,
 }));
 
+// Prevent tests from spawning the real auggie binary — make execFile fail
+// immediately so the model registry falls back to FALLBACK_MODEL_IDS.
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_cmd: string, _args: string[], _opts: object, cb: Function) =>
+    cb(new Error("auggie not available in test environment"), "")
+  ),
+}));
+
 describe("integration — full request flow", () => {
   let chatApp: Hono;
   let modelsApp: Hono;
@@ -349,7 +357,7 @@ describe("integration — full request flow", () => {
           completion_tokens: 8,
           total_tokens: 23,
         },
-        system_fingerprint: "augment_oai_proxy",
+        system_fingerprint: "augment_open_proxy",
       });
     });
 
@@ -489,7 +497,7 @@ describe("integration — full request flow", () => {
       });
 
       // Augment-specific fingerprint
-      expect(body.system_fingerprint).toBe("augment_oai_proxy");
+      expect(body.system_fingerprint).toBe("augment_open_proxy");
     });
   });
 

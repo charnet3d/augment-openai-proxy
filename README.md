@@ -1,6 +1,6 @@
-# augment-oai-proxy
+# augment-open-proxy
 
-OpenAI-compatible HTTP proxy that routes requests through the Augment SDK. Use any OpenAI-compatible client (Claude Code, Cursor, Continue, etc.) with Augment LLMs.
+OpenAI/Anthropic-compatible HTTP proxy that routes requests through the Augment SDK. Use any OpenAI-compatible client (Claude Code, Cursor, Continue, etc.) with Augment LLMs.
 
 ## Prerequisites
 

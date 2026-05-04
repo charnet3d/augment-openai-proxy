@@ -28,6 +28,14 @@ vi.mock("@augmentcode/auggie-sdk", () => ({
   AugmentLanguageModel: MockAugmentLanguageModel,
 }));
 
+// Prevent tests from spawning the real auggie binary — make execFile fail
+// immediately so the model registry falls back to FALLBACK_MODEL_IDS.
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_cmd: string, _args: string[], _opts: object, cb: Function) =>
+    cb(new Error("auggie not available in test environment"), "")
+  ),
+}));
+
 describe("chat route", () => {
   let app: Hono;
 
@@ -142,7 +150,7 @@ describe("chat route", () => {
       expect(body.id).toMatch(/^chatcmpl-/);
       expect(body.model).toBe("claude-sonnet-4-5");
       expect(body.created).toBeGreaterThan(0);
-      expect(body.system_fingerprint).toBe("augment_oai_proxy");
+      expect(body.system_fingerprint).toBe("augment_open_proxy");
     });
 
     it("should include correct choice structure", async () => {

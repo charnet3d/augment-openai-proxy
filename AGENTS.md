@@ -1,0 +1,1 @@
+> **Important**: Always load the `caveman` skill for more compact agent output. When committing to git, always make a good concise message that follows 50/72 rule.

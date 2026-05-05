@@ -71,6 +71,40 @@ async function runAuggieCli(): Promise<CliResult> {
   }
 }
 
+// ── Responses-API SSE helpers ────────────────────────────────────────────────
+// Responses-API SSE frames carry `event: <type>` plus `data: <json>` per
+// event (unlike chat-completions which only uses `data:`). Parse both.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseResponsesSse(raw: string): Array<{ event: string; data: any }> {
+  return raw
+    .split("\n\n")
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block.split("\n");
+      const eventLine = lines.find((l) => l.startsWith("event: ")) ?? "";
+      const dataLine = lines.find((l) => l.startsWith("data: ")) ?? "";
+      return {
+        event: eventLine.slice("event: ".length),
+        data: dataLine ? JSON.parse(dataLine.slice("data: ".length)) : null,
+      };
+    });
+}
+
+async function drainStream(response: Response): Promise<string> {
+  const bodyStream = response.body;
+  if (!bodyStream) throw new Error("Response body is null");
+  const reader = bodyStream.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    raw += decoder.decode(value, { stream: true });
+  }
+  return raw;
+}
+
 // ── Suite ─────────────────────────────────────────────────────────────────────
 // The whole suite is skipped when credentials are absent.
 const describeE2E = credentialsAvailable ? describe : describe.skip;
@@ -86,11 +120,13 @@ describeE2E("e2e — real Augment API", () => {
     const { default: chatRouter } = await import("../routes/chat");
     const { default: modelsRouter } = await import("../routes/models");
     const { default: messagesRouter } = await import("../routes/messages");
+    const { default: responsesRouter } = await import("../routes/responses");
 
     app = new Hono();
     app.route("/v1/chat", chatRouter);
     app.route("/v1/models", modelsRouter);
     app.route("/v1/messages", messagesRouter);
+    app.route("/v1/responses", responsesRouter);
 
     // Discover a real model to use for the chat tests below.
     const res = await app.fetch(new Request("http://localhost/v1/models"));
@@ -1265,6 +1301,587 @@ describeE2E("e2e — real Augment API", () => {
       const textBlocks = body.content.filter((b: any) => b.type === "text");
       const fullText = textBlocks.map((b: { text: string }) => b.text).join("");
       expect(fullText.toLowerCase()).toContain("pong");
+    }, 60_000);
+  });
+
+  // ── POST /v1/responses (non-streaming) ───────────────────────────────────
+  describe("POST /v1/responses (non-streaming)", () => {
+    it("returns a real assistant reply with the Responses-API envelope", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            input: 'Reply with exactly the word "pong" and nothing else.',
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+
+      // Envelope
+      expect(body.id).toMatch(/^resp_/);
+      expect(body.object).toBe("response");
+      expect(body.status).toBe("completed");
+      expect(body.error).toBeNull();
+      expect(body.model).toBe(testModelId);
+      expect(typeof body.created_at).toBe("number");
+
+      // Output: at minimum one assistant message item carrying output_text.
+      expect(Array.isArray(body.output)).toBe(true);
+      const message = body.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      expect(message, "no assistant message in output").toBeDefined();
+      expect(message.role).toBe("assistant");
+      expect(message.status).toBe("completed");
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      expect(textPart).toBeDefined();
+      expect((textPart.text as string).toLowerCase()).toContain("pong");
+
+      // Usage shape: input/output/total tokens, all positive and consistent.
+      expect(body.usage.input_tokens).toBeGreaterThan(0);
+      expect(body.usage.output_tokens).toBeGreaterThan(0);
+      expect(body.usage.total_tokens).toBe(
+        body.usage.input_tokens + body.usage.output_tokens
+      );
+    }, 30_000);
+
+    it("returns a function_call output item when the model calls a tool", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            input: "What is the weather in Paris?",
+            tools: [
+              {
+                type: "function",
+                name: "get_current_weather",
+                description: "Get the current weather for a city.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    city: { type: "string", description: "The city name" },
+                  },
+                  required: ["city"],
+                },
+              },
+            ],
+            tool_choice: "required",
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      expect(body.status).toBe("completed");
+
+      const call = body.output.find(
+        (item: { type: string }) => item.type === "function_call"
+      );
+      expect(call, "no function_call in output").toBeDefined();
+      expect(call.name).toBe("get_current_weather");
+      expect(typeof call.call_id).toBe("string");
+      expect(call.call_id.length).toBeGreaterThan(0);
+      expect(call.status).toBe("completed");
+      // Arguments must parse to a JSON object containing `city`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any = JSON.parse(call.arguments);
+      expect(typeof args.city).toBe("string");
+      expect(args.city.length).toBeGreaterThan(0);
+    }, 30_000);
+  });
+
+  // ── POST /v1/responses (streaming) ───────────────────────────────────────
+  describe("POST /v1/responses (streaming)", () => {
+    it("delivers the Responses-API SSE lifecycle and reconstructs a valid reply", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            input: 'Reply with exactly the word "pong" and nothing else.',
+            stream: true,
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      const events = parseResponsesSse(await drainStream(response));
+      expect(events.length).toBeGreaterThan(0);
+
+      // Lifecycle: response.created → response.in_progress → output_item.added
+      // → output_text.delta… → output_text.done → content_part.done →
+      // output_item.done → response.completed.
+      expect(events[0].event).toBe("response.created");
+      expect(events[1].event).toBe("response.in_progress");
+      expect(events.at(-1)?.event).toBe("response.completed");
+
+      // sequence_number must be strictly monotonic across the whole stream.
+      const seqs = events.map((e) => e.data?.sequence_number as number);
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i]).toBe(seqs[i - 1] + 1);
+      }
+
+      const types = events.map((e) => e.event);
+      expect(types).toContain("response.output_item.added");
+      expect(types).toContain("response.output_text.delta");
+      expect(types).toContain("response.output_text.done");
+      expect(types).toContain("response.output_item.done");
+
+      // Reconstruct the assistant reply from output_text.delta events.
+      const reconstructed = events
+        .filter((e) => e.event === "response.output_text.delta")
+        .map((e) => (e.data?.delta as string) ?? "")
+        .join("");
+      expect(reconstructed.toLowerCase()).toContain("pong");
+
+      // Final response.completed must echo the requested model and a real
+      // assistant message item with the same text.
+      const completed = events.at(-1)?.data?.response;
+      expect(completed.status).toBe("completed");
+      expect(completed.model).toBe(testModelId);
+      expect(completed.usage.input_tokens).toBeGreaterThan(0);
+      expect(completed.usage.output_tokens).toBeGreaterThan(0);
+      expect(completed.usage.total_tokens).toBe(
+        completed.usage.input_tokens + completed.usage.output_tokens
+      );
+      const message = completed.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      expect(message).toBeDefined();
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      expect((textPart.text as string).toLowerCase()).toContain("pong");
+    }, 30_000);
+
+    it("streams function_call_arguments deltas and emits a completed function_call item", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            input: "What is the weather in Paris?",
+            tools: [
+              {
+                type: "function",
+                name: "get_current_weather",
+                description: "Get the current weather for a city.",
+                parameters: {
+                  type: "object",
+                  properties: { city: { type: "string" } },
+                  required: ["city"],
+                },
+              },
+            ],
+            tool_choice: "required",
+            stream: true,
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const events = parseResponsesSse(await drainStream(response));
+      const types = events.map((e) => e.event);
+
+      expect(types).toContain("response.output_item.added");
+      expect(types).toContain("response.function_call_arguments.delta");
+      expect(types).toContain("response.function_call_arguments.done");
+      expect(types.at(-1)).toBe("response.completed");
+
+      // Reconstruct the arguments from delta events; must parse to a JSON
+      // object that contains a `city` field.
+      const argsString = events
+        .filter((e) => e.event === "response.function_call_arguments.delta")
+        .map((e) => (e.data?.delta as string) ?? "")
+        .join("");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const parsed: any = JSON.parse(argsString);
+      expect(typeof parsed.city).toBe("string");
+      expect(parsed.city.length).toBeGreaterThan(0);
+
+      // The completed envelope must carry the function_call output item.
+      const completed = events.at(-1)?.data?.response;
+      expect(completed.status).toBe("completed");
+      const call = completed.output.find(
+        (item: { type: string }) => item.type === "function_call"
+      );
+      expect(call).toBeDefined();
+      expect(call.name).toBe("get_current_weather");
+      expect(call.status).toBe("completed");
+      expect(typeof call.call_id).toBe("string");
+      expect(call.call_id.length).toBeGreaterThan(0);
+    }, 30_000);
+  });
+  // ── POST /v1/responses (multi-turn with tool result round-trip) ──────────
+  // Exercises the input flattener: a heterogeneous `input` array carrying
+  // user message → function_call → function_call_output must be collapsed
+  // into the equivalent user/assistant(tool-call)/tool(tool-result) turns
+  // before reaching the SDK, so the model can use the result.
+  describe("POST /v1/responses (tool result round-trip)", () => {
+    it("feeds a function_call_output back to the model and produces a follow-up reply", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            input: [
+              { role: "user", content: "What is the weather in Paris?" },
+              {
+                type: "function_call",
+                call_id: "call_e2e_1",
+                name: "get_current_weather",
+                arguments: '{"city":"Paris"}',
+              },
+              {
+                type: "function_call_output",
+                call_id: "call_e2e_1",
+                output: '{"temperature_c":21,"summary":"sunny"}',
+              },
+            ],
+            tools: [
+              {
+                type: "function",
+                name: "get_current_weather",
+                description: "Get the current weather for a city.",
+                parameters: {
+                  type: "object",
+                  properties: { city: { type: "string" } },
+                  required: ["city"],
+                },
+              },
+            ],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      expect(body.status).toBe("completed");
+
+      // The model must produce a final assistant message — proving the tool
+      // result was actually consumed (rather than re-issuing another call).
+      const message = body.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      expect(message, "no assistant message in follow-up output").toBeDefined();
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      const text = (textPart.text as string).toLowerCase();
+      // The reply should reference the temperature or weather summary we
+      // injected. Either signal is acceptable — model wording varies.
+      expect(text.length).toBeGreaterThan(0);
+      expect(text).toMatch(/sunny|21|paris|warm|weather/);
+    }, 60_000);
+
+    it("streams a follow-up reply when a function_call_output is fed back via stream:true", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            stream: true,
+            input: [
+              { role: "user", content: "What is the weather in Paris?" },
+              {
+                type: "function_call",
+                call_id: "call_e2e_stream_1",
+                name: "get_current_weather",
+                arguments: '{"city":"Paris"}',
+              },
+              {
+                type: "function_call_output",
+                call_id: "call_e2e_stream_1",
+                output: '{"temperature_c":21,"summary":"sunny"}',
+              },
+            ],
+            tools: [
+              {
+                type: "function",
+                name: "get_current_weather",
+                description: "Get the current weather for a city.",
+                parameters: {
+                  type: "object",
+                  properties: { city: { type: "string" } },
+                  required: ["city"],
+                },
+              },
+            ],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      const events = parseResponsesSse(await drainStream(response));
+      const types = events.map((e) => e.event);
+
+      // Lifecycle invariants.
+      expect(types[0]).toBe("response.created");
+      expect(types[1]).toBe("response.in_progress");
+      expect(types.at(-1)).toBe("response.completed");
+      const seqs = events.map((e) => e.data?.sequence_number as number);
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i]).toBe(seqs[i - 1] + 1);
+      }
+
+      // The follow-up turn must produce a streamed assistant message — not
+      // another function_call. That proves the tool result was consumed.
+      expect(types).toContain("response.output_text.delta");
+      const reconstructed = events
+        .filter((e) => e.event === "response.output_text.delta")
+        .map((e) => (e.data?.delta as string) ?? "")
+        .join("");
+      expect(reconstructed.length).toBeGreaterThan(0);
+      expect(reconstructed.toLowerCase()).toMatch(/sunny|21|paris|warm|weather/);
+
+      // No additional function_call should be emitted on this turn.
+      const completed = events.at(-1)?.data?.response;
+      expect(completed.status).toBe("completed");
+      const newCall = completed.output.find(
+        (item: { type: string }) => item.type === "function_call"
+      );
+      expect(newCall, "follow-up turn unexpectedly emitted another function_call").toBeUndefined();
+
+      // The completed envelope must contain the assistant message whose
+      // text equals the reconstructed delta concatenation.
+      const message = completed.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      expect(message).toBeDefined();
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      expect(textPart.text).toBe(reconstructed);
+    }, 60_000);
+  });
+
+  // ── POST /v1/responses (instructions field) ──────────────────────────────
+  describe("POST /v1/responses (instructions)", () => {
+    it("treats top-level instructions as a system prompt and echoes it on the envelope", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            instructions:
+              'You are a calculator. Reply with only the digits of the answer, no words, no punctuation.',
+            input: "What is 6 times 7?",
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      expect(body.status).toBe("completed");
+      // Envelope echoes the instructions verbatim.
+      expect(typeof body.instructions).toBe("string");
+      expect(body.instructions).toContain("calculator");
+
+      const message = body.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      // The system prompt must have steered the reply: it should contain 42.
+      expect((textPart.text as string)).toContain("42");
+    }, 30_000);
+  });
+
+  // ── POST /v1/responses (reasoning effort → model suffix) ─────────────────
+  // Mirrors the chat-completions effort-suffixing test: the proxy rewrites
+  // base model + reasoning.effort to the suffixed backend ID and must still
+  // echo the base ID back on the response envelope.
+  describe("POST /v1/responses (reasoning effort suffixing)", () => {
+    let effortBaseId = "";
+    let effortLevel = "";
+
+    const EFFORT_SUFFIX_RE = /-(low|medium|high|max|xhigh)$/;
+
+    beforeAll(async () => {
+      const res = await app.fetch(new Request("http://localhost/v1/models"));
+      if (!res.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await res.json();
+      const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+      const idSet = new Set(ids);
+      for (const id of ids) {
+        const m = EFFORT_SUFFIX_RE.exec(id);
+        if (!m) continue;
+        const base = id.slice(0, -m[0].length);
+        if (idSet.has(base)) {
+          effortBaseId = base;
+          effortLevel = m[1];
+          break;
+        }
+      }
+    }, 20_000);
+
+    it("rewrites base model + reasoning.effort to the suffixed backend ID and preserves the base ID in the response", async () => {
+      if (!effortBaseId) return;
+      const openaiEffort =
+        effortLevel === "low" || effortLevel === "medium" || effortLevel === "high"
+          ? effortLevel
+          : "high";
+
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: effortBaseId,
+            input: 'Reply with exactly the word "pong" and nothing else.',
+            reasoning: { effort: openaiEffort },
+          }),
+        })
+      );
+
+      expect(
+        response.status,
+        `base ${effortBaseId} + reasoning.effort=${openaiEffort} returned ${response.status}`
+      ).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      // Envelope must echo the base model and the requested effort.
+      expect(body.model).toBe(effortBaseId);
+      expect(body.reasoning?.effort).toBe(openaiEffort);
+      expect(body.status).toBe("completed");
+
+      const message = body.output.find(
+        (item: { type: string }) => item.type === "message"
+      );
+      const textPart = message.content.find(
+        (p: { type: string }) => p.type === "output_text"
+      );
+      expect((textPart.text as string).toLowerCase()).toContain("pong");
+    }, 60_000);
+  });
+
+  // ── POST /v1/responses (streaming reasoning) ─────────────────────────────
+  // Mirrors the chat-completions reasoning-streaming test. The Augment
+  // backend does not always surface THINKING nodes, so we only assert on the
+  // reasoning lifecycle when the upstream actually emitted summary deltas —
+  // the request itself must always succeed and reconstruct a valid reply.
+  describe("POST /v1/responses (streaming reasoning)", () => {
+    let reasoningModelId = "";
+
+    beforeAll(async () => {
+      const res = await app.fetch(new Request("http://localhost/v1/models"));
+      if (!res.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await res.json();
+      const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+      reasoningModelId =
+        ids.find((id) => id.startsWith("gpt-5")) ??
+        ids.find((id) => /thinking|reasoning/.test(id)) ??
+        testModelId;
+    }, 20_000);
+
+    it("emits a valid lifecycle for reasoning {effort, summary} and surfaces summary deltas when present", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: reasoningModelId,
+            input:
+              "Think step by step. What is 7 + 5? Reply with only the digits.",
+            stream: true,
+            reasoning: { effort: "medium", summary: "concise" },
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      const events = parseResponsesSse(await drainStream(response));
+      const types = events.map((e) => e.event);
+
+      // Lifecycle invariants hold regardless of whether reasoning surfaced.
+      expect(types[0]).toBe("response.created");
+      expect(types[1]).toBe("response.in_progress");
+      expect(types.at(-1)).toBe("response.completed");
+      const seqs = events.map((e) => e.data?.sequence_number as number);
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i]).toBe(seqs[i - 1] + 1);
+      }
+
+      // The model must still produce a valid assistant reply.
+      const reconstructed = events
+        .filter((e) => e.event === "response.output_text.delta")
+        .map((e) => (e.data?.delta as string) ?? "")
+        .join("");
+      expect(reconstructed.length).toBeGreaterThan(0);
+
+      // When reasoning surfaced, every part of the lifecycle must be valid:
+      // added → delta(s) → done part → done item, all carrying the same
+      // item_id and a non-empty reconstructed summary.
+      const reasoningDeltas = events.filter(
+        (e) => e.event === "response.reasoning_summary_text.delta"
+      );
+      if (reasoningDeltas.length > 0) {
+        expect(types).toContain("response.reasoning_summary_part.added");
+        expect(types).toContain("response.reasoning_summary_text.done");
+        expect(types).toContain("response.reasoning_summary_part.done");
+
+        const summary = reasoningDeltas
+          .map((e) => (e.data?.delta as string) ?? "")
+          .join("");
+        expect(summary.length).toBeGreaterThan(0);
+
+        // The same item_id must be carried across delta and done events.
+        const itemId = reasoningDeltas[0].data?.item_id as string;
+        expect(typeof itemId).toBe("string");
+        expect(itemId.length).toBeGreaterThan(0);
+        const doneText = events.find(
+          (e) => e.event === "response.reasoning_summary_text.done"
+        );
+        expect(doneText?.data?.item_id).toBe(itemId);
+        expect(doneText?.data?.text).toBe(summary);
+
+        // The completed envelope must include a reasoning output item with
+        // a matching summary_text part.
+        const completed = events.at(-1)?.data?.response;
+        const reasoningItem = completed.output.find(
+          (item: { type: string }) => item.type === "reasoning"
+        );
+        expect(reasoningItem, "no reasoning item in completed output").toBeDefined();
+        expect(reasoningItem.id).toBe(itemId);
+        expect(reasoningItem.status).toBe("completed");
+        const summaryPart = reasoningItem.summary.find(
+          (p: { type: string }) => p.type === "summary_text"
+        );
+        expect(summaryPart.text).toBe(summary);
+      }
+
+      // Final completed envelope must carry the requested model and effort.
+      const completed = events.at(-1)?.data?.response;
+      expect(completed.status).toBe("completed");
+      expect(completed.model).toBe(reasoningModelId);
+      expect(completed.reasoning?.effort).toBe("medium");
+      expect(completed.reasoning?.summary).toBe("concise");
     }, 60_000);
   });
 });

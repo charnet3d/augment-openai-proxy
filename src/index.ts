@@ -5,6 +5,7 @@ import { HOST, PORT } from "./config";
 import chatRouter from "./routes/chat";
 import messagesRouter from "./routes/messages";
 import modelsRouter from "./routes/models";
+import responsesRouter from "./routes/responses";
 import { validateCredentials } from "./services/augmentClient";
 import { installHttpAgent } from "./services/httpAgent";
 import { loggingMiddleware } from "./services/logger";
@@ -29,6 +30,7 @@ app.get("/", (c) => {
 // OpenAI-compatible routes
 app.route("/v1/chat", chatRouter);
 app.route("/v1/models", modelsRouter);
+app.route("/v1/responses", responsesRouter);
 
 // Anthropic-compatible routes (Claude Code, Anthropic SDK, etc.)
 app.route("/v1/messages", messagesRouter);
@@ -86,9 +88,10 @@ function printBanner() {
   console.log("║     Augment Open Proxy is running                                            ║");
   console.log("╠══════════════════════════════════════════════════════════════════════════════╣");
   console.log(`║  URL:      http://${HOST}:${PORT}`);
-  console.log(`║  Chat:     http://${HOST}:${PORT}/v1/chat/completions`);
-  console.log(`║  Messages: http://${HOST}:${PORT}/v1/messages`);
-  console.log(`║  Models:   http://${HOST}:${PORT}/v1/models`);
+  console.log(`║  Chat:      http://${HOST}:${PORT}/v1/chat/completions`);
+  console.log(`║  Responses: http://${HOST}:${PORT}/v1/responses`);
+  console.log(`║  Messages:  http://${HOST}:${PORT}/v1/messages`);
+  console.log(`║  Models:    http://${HOST}:${PORT}/v1/models`);
   console.log("╚══════════════════════════════════════════════════════════════════════════════╝");
   console.log("");
 }

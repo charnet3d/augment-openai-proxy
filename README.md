@@ -1,6 +1,6 @@
 # augment-open-proxy
 
-OpenAI/Anthropic-compatible HTTP proxy that routes requests through the Augment SDK. Use any OpenAI-compatible client (Claude Code, Cursor, Continue, etc.) with Augment LLMs.
+OpenAI- and Anthropic-compatible HTTP proxy that routes requests through the Augment SDK. Use any OpenAI- or Anthropic-compatible client (Claude Code, Cursor, Continue, etc.) with Augment LLMs.
 
 ## Prerequisites
 
@@ -35,6 +35,8 @@ AUGMENT_API_URL=
 | `AUGMENT_API_TOKEN` | No | API token for authentication. Falls back to `auggie login` session if omitted. |
 | `AUGMENT_API_URL` | No | Tenant-specific API URL. Required when `AUGMENT_API_TOKEN` is set. |
 | `AUGMENT_DISABLE_EFFORT_MODELS` | No | Comma- or whitespace-separated list of base model IDs (or CLI short names) whose effort variants should be hidden from `/v1/models` and not used for `reasoning_effort` rewriting. See [Reasoning effort](#reasoning-effort). |
+| `LOGGING` | No | Per-request logging verbosity. `none` (silent), `info` (one line per request: method, path, status, durationMs, model, requestId, usage — default), or `body` (`info` plus full request and assembled response payloads). See [Structured logging](#structured-logging). |
+| `LOG_FORMAT` | No | Output shape for log records: `text` (human-readable single line, default) or `json` (single-line JSON per record). See [Structured logging](#structured-logging). |
 
 ## Usage
 
@@ -74,9 +76,11 @@ Point your agent's OpenAI base URL to the proxy:
 OPENAI_BASE_URL=http://localhost:7888/v1
 ```
 
-For example, with Claude Code:
+For Anthropic-native clients (Claude Code, Anthropic SDK), point them at the
+Anthropic-compatible endpoint instead:
+
 ```bash
-OPENAI_BASE_URL=http://localhost:7888/v1 claude
+ANTHROPIC_BASE_URL=http://localhost:7888 claude
 ```
 
 ## API Endpoints
@@ -142,6 +146,47 @@ Tool calling (function calling) is supported via the Augment SDK:
   ]
 }
 ```
+
+### `POST /v1/messages`
+
+Anthropic-compatible Messages API endpoint, suitable for Claude Code and the
+official `@anthropic-ai/sdk` client. Accepts the standard Anthropic request
+body (`model`, `messages`, `system`, `tools`, `tool_choice`, `max_tokens`,
+`temperature`, `top_p`, `top_k`, `stop_sequences`, `thinking`, `stream`).
+
+**Request body:**
+```json
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 1024,
+  "messages": [
+    { "role": "user", "content": "Explain TypeScript generics." }
+  ],
+  "stream": true
+}
+```
+
+**Response (non-streaming):** Standard Anthropic `Message` envelope with
+`content` blocks (`text`, `tool_use`, `thinking`), `stop_reason`, and `usage`.
+
+**Response (streaming):** Anthropic SSE event sequence — `message_start` →
+`content_block_start` / `content_block_delta` (`text_delta`,
+`input_json_delta`, `thinking_delta`) / `content_block_stop` →
+`message_delta` → `message_stop`.
+
+**Extended thinking.** Pass `"thinking": { "type": "enabled",
+"budget_tokens": N }` to map onto Augment's effort tiers (≤4096 → low,
+≤16384 → medium, >16384 → high). When the registry advertises the
+corresponding effort level for the requested base model, the request is
+forwarded to the suffixed model ID (e.g. `claude-opus-4-7-high`) and the
+response echoes the original base model.
+
+### `POST /v1/messages/count_tokens`
+
+Returns an estimated `input_tokens` count for a given message payload. The
+Augment backend does not expose an exact counter, so this uses a 4-chars-
+per-token heuristic — sufficient for budgeting / progress UIs but not for
+billing-grade accuracy.
 
 ### Reasoning effort
 
@@ -222,6 +267,40 @@ Image input is supported via the standard OpenAI `image_url` content part:
 Both data URLs (`data:image/<png|jpeg|gif|webp>;base64,...`) and remote URLs are accepted; remote URLs are downloaded by the AI SDK before being forwarded. Audio is not supported.
 
 This feature relies on a runtime patch of `@augmentcode/auggie-sdk` because the upstream SDK does not yet expose its image wire format. The wire shape may change without notice on the Augment side.
+
+### Structured logging
+
+Per-request logs are emitted to stdout, one record per request, controlled
+by two environment variables: `LOGGING` (verbosity) and `LOG_FORMAT` (shape).
+
+**Levels** (`LOGGING`):
+
+| Level | What is logged |
+|---|---|
+| `none` | Nothing — silent. |
+| `info` *(default)* | `ts`, `method`, `path`, `status`, `durationMs`, `requestId`, `model`, `effectiveModel` (when the effort suffix swap rewrote the ID), `stream`, and `usage` (`input_tokens` / `output_tokens` / `total_tokens`). |
+| `body` | Everything in `info` plus the parsed `request` body and the assembled `response` body. For streaming responses the assembled response is the concatenated text / thinking / tool-call arguments — not the raw SSE frames. |
+
+**Formats** (`LOG_FORMAT`):
+
+| Format | When to use |
+|---|---|
+| `text` *(default)* | Human-readable single line. Best for local development and tailing. `body` mode appends the request and response on indented continuation lines. |
+| `json` | Single-line JSON per record. Best for `jq`, Loki, Vector, or any structured log collector. |
+
+Example `info` line, `text` format:
+
+```
+[2026-05-04T12:34:56.789Z] INFO POST /v1/chat/completions 200 842ms model=claude-sonnet-4-5 req=chatcmpl-… tokens=42/128/170
+```
+
+Same record, `json` format:
+
+```json
+{"ts":"2026-05-04T12:34:56.789Z","level":"info","method":"POST","path":"/v1/chat/completions","status":200,"durationMs":842,"requestId":"chatcmpl-…","model":"claude-sonnet-4-5","stream":false,"usage":{"input_tokens":42,"output_tokens":128,"total_tokens":170}}
+```
+
+`body` mode also captures errors (`error` field) for failed generations.
 
 ## Known Limitations
 

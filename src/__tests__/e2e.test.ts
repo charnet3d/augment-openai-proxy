@@ -85,10 +85,12 @@ describeE2E("e2e — real Augment API", () => {
     // Import the real routes — no vi.mock in this file, so the real SDK is used.
     const { default: chatRouter } = await import("../routes/chat");
     const { default: modelsRouter } = await import("../routes/models");
+    const { default: messagesRouter } = await import("../routes/messages");
 
     app = new Hono();
     app.route("/v1/chat", chatRouter);
     app.route("/v1/models", modelsRouter);
+    app.route("/v1/messages", messagesRouter);
 
     // Discover a real model to use for the chat tests below.
     const res = await app.fetch(new Request("http://localhost/v1/models"));
@@ -882,6 +884,387 @@ describeE2E("e2e — real Augment API", () => {
       expect(body.choices[0].message.role).toBe("assistant");
       expect((body.choices[0].message.content as string).toLowerCase()).toContain("pong");
       expect(body.choices[0].finish_reason).toBe("stop");
+    }, 60_000);
+  });
+
+  // ── POST /v1/messages/count_tokens ───────────────────────────────────────
+  describe("POST /v1/messages/count_tokens", () => {
+    it("returns a positive estimated input_tokens count", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages/count_tokens", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            messages: [{ role: "user", content: "hello world from e2e" }],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      expect(typeof body.input_tokens).toBe("number");
+      expect(body.input_tokens).toBeGreaterThan(0);
+    }, 10_000);
+  });
+
+  // ── POST /v1/messages (non-streaming) ────────────────────────────────────
+  describe("POST /v1/messages (non-streaming)", () => {
+    it("returns a real assistant reply with a correct Anthropic message envelope", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            max_tokens: 64,
+            messages: [
+              {
+                role: "user",
+                content: 'Reply with exactly the word "pong" and nothing else.',
+              },
+            ],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+
+      // Envelope
+      expect(body.id).toMatch(/^msg_/);
+      expect(body.type).toBe("message");
+      expect(body.role).toBe("assistant");
+      expect(body.model).toBe(testModelId);
+      expect(body.stop_reason).toBe("end_turn");
+      expect(body.stop_sequence).toBeNull();
+
+      // Content blocks: at least one text block, and the text contains "pong".
+      expect(Array.isArray(body.content)).toBe(true);
+      expect(body.content.length).toBeGreaterThan(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const textBlocks = body.content.filter((b: any) => b.type === "text");
+      expect(textBlocks.length).toBeGreaterThan(0);
+      const fullText = textBlocks.map((b: { text: string }) => b.text).join("");
+      expect(fullText.toLowerCase()).toContain("pong");
+
+      // Usage — must be real non-zero numbers.
+      expect(body.usage.input_tokens).toBeGreaterThan(0);
+      expect(body.usage.output_tokens).toBeGreaterThan(0);
+    }, 30_000);
+
+    it("honours a system prompt", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            max_tokens: 64,
+            system:
+              'You are a strict echo bot. Reply with exactly the word "ack" and nothing else.',
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const textBlocks = body.content.filter((b: any) => b.type === "text");
+      const fullText = textBlocks.map((b: { text: string }) => b.text).join("");
+      expect(fullText.toLowerCase()).toContain("ack");
+    }, 30_000);
+  });
+
+  // ── Shared Anthropic tool definition (uses input_schema, not parameters) ──
+  const anthropicWeatherTool = {
+    name: "get_current_weather",
+    description: "Get the current weather for a city.",
+    input_schema: {
+      type: "object",
+      properties: {
+        city: { type: "string", description: "The city name, e.g. Paris" },
+      },
+      required: ["city"],
+    },
+  };
+
+  // ── POST /v1/messages (tool calling, non-streaming) ──────────────────────
+  describe("POST /v1/messages (tool calling, non-streaming)", () => {
+    it("returns a tool_use content block with the correct Anthropic shape", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            max_tokens: 256,
+            messages: [{ role: "user", content: "What is the weather in Paris?" }],
+            tools: [anthropicWeatherTool],
+            tool_choice: { type: "any" },
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+
+      expect(body.id).toMatch(/^msg_/);
+      expect(body.type).toBe("message");
+      expect(body.model).toBe(testModelId);
+      expect(body.stop_reason).toBe("tool_use");
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const toolBlocks = body.content.filter((b: any) => b.type === "tool_use");
+      expect(toolBlocks.length).toBeGreaterThan(0);
+      const tu = toolBlocks[0];
+      expect(typeof tu.id).toBe("string");
+      expect(tu.id.length).toBeGreaterThan(0);
+      expect(tu.name).toBe("get_current_weather");
+      expect(typeof tu.input).toBe("object");
+      expect(tu.input).not.toBeNull();
+      expect(typeof tu.input.city).toBe("string");
+      expect(tu.input.city.length).toBeGreaterThan(0);
+    }, 30_000);
+  });
+
+  // ── POST /v1/messages (streaming) ────────────────────────────────────────
+  describe("POST /v1/messages (streaming)", () => {
+    it("delivers a real Anthropic SSE event sequence whose deltas reconstruct a valid reply", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            max_tokens: 64,
+            messages: [
+              {
+                role: "user",
+                content: 'Reply with exactly the word "pong" and nothing else.',
+              },
+            ],
+            stream: true,
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      // Drain the SSE stream.
+      const bodyStream = response.body;
+      if (!bodyStream) throw new Error("Response body is null");
+      const reader = bodyStream.getReader();
+      const decoder = new TextDecoder();
+      let rawSse = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rawSse += decoder.decode(value, { stream: true });
+      }
+
+      // Parse Anthropic SSE: each event has `event: <type>\ndata: <json>`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const events: any[] = rawSse
+        .split("\n\n")
+        .map((e) => e.trim())
+        .filter(Boolean)
+        .map((block) => {
+          const dataLine = block
+            .split("\n")
+            .find((l) => l.startsWith("data: "));
+          expect(dataLine, `event missing data line: ${block}`).toBeDefined();
+          return JSON.parse((dataLine as string).slice("data: ".length));
+        });
+
+      const types = events.map((e) => e.type);
+      expect(types[0]).toBe("message_start");
+      expect(types).toContain("content_block_start");
+      expect(types).toContain("content_block_delta");
+      expect(types).toContain("content_block_stop");
+      expect(types).toContain("message_delta");
+      expect(types.at(-1)).toBe("message_stop");
+
+      // message_start envelope must echo the requested model.
+      const start = events[0];
+      expect(start.message.id).toMatch(/^msg_/);
+      expect(start.message.model).toBe(testModelId);
+      expect(start.message.role).toBe("assistant");
+
+      // Reconstruct the full reply from text_delta events.
+      const reconstructed = events
+        .filter(
+          (e) =>
+            e.type === "content_block_delta" &&
+            e.delta?.type === "text_delta"
+        )
+        .map((e) => e.delta.text as string)
+        .join("");
+      expect(reconstructed.length).toBeGreaterThan(0);
+      expect(reconstructed.toLowerCase()).toContain("pong");
+
+      // message_delta carries the final stop reason and output token count.
+      const messageDelta = events.find((e) => e.type === "message_delta");
+      expect(messageDelta.delta.stop_reason).toBe("end_turn");
+      expect(typeof messageDelta.usage.output_tokens).toBe("number");
+      expect(messageDelta.usage.output_tokens).toBeGreaterThan(0);
+    }, 30_000);
+  });
+
+  // ── POST /v1/messages (tool calling, streaming) ──────────────────────────
+  describe("POST /v1/messages (tool calling, streaming)", () => {
+    it("streams tool_use blocks via input_json_delta events with stop_reason=tool_use", async () => {
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: testModelId,
+            max_tokens: 256,
+            messages: [{ role: "user", content: "What is the weather in Paris?" }],
+            tools: [anthropicWeatherTool],
+            tool_choice: { type: "any" },
+            stream: true,
+          }),
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+
+      // Drain the SSE stream.
+      const bodyStream = response.body;
+      if (!bodyStream) throw new Error("Response body is null");
+      const reader = bodyStream.getReader();
+      const decoder = new TextDecoder();
+      let rawSse = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rawSse += decoder.decode(value, { stream: true });
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const events: any[] = rawSse
+        .split("\n\n")
+        .map((e) => e.trim())
+        .filter(Boolean)
+        .map((block) => {
+          const dataLine = block
+            .split("\n")
+            .find((l) => l.startsWith("data: "));
+          return JSON.parse((dataLine as string).slice("data: ".length));
+        });
+
+      expect(events[0].type).toBe("message_start");
+      expect(events.at(-1).type).toBe("message_stop");
+
+      // The tool_use block must open with content_block_start carrying the name.
+      const toolStart = events.find(
+        (e) =>
+          e.type === "content_block_start" &&
+          e.content_block?.type === "tool_use"
+      );
+      expect(toolStart, "no tool_use content_block_start emitted").toBeDefined();
+      expect(typeof toolStart.content_block.id).toBe("string");
+      expect(toolStart.content_block.id.length).toBeGreaterThan(0);
+      expect(toolStart.content_block.name).toBe("get_current_weather");
+
+      // Reconstruct the tool input by concatenating all input_json_delta fragments
+      // for the tool block index.
+      const toolIdx = toolStart.index;
+      const partialJson = events
+        .filter(
+          (e) =>
+            e.type === "content_block_delta" &&
+            e.index === toolIdx &&
+            e.delta?.type === "input_json_delta"
+        )
+        .map((e) => e.delta.partial_json as string)
+        .join("");
+      expect(partialJson.length).toBeGreaterThan(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any = JSON.parse(partialJson);
+      expect(typeof args.city).toBe("string");
+      expect(args.city.length).toBeGreaterThan(0);
+
+      // Final stop_reason must be tool_use.
+      const messageDelta = events.find((e) => e.type === "message_delta");
+      expect(messageDelta.delta.stop_reason).toBe("tool_use");
+    }, 30_000);
+  });
+
+  // ── POST /v1/messages (extended thinking → effort suffix) ────────────────
+  // Anthropic's `thinking.budget_tokens` is mapped to an OpenAI-style effort
+  // (low/medium/high) and rewritten to a suffixed model ID
+  // (e.g. claude-opus-4-7-high) when the registry advertises one. The
+  // response must echo the original (base) model ID — not the rewritten one.
+  describe("POST /v1/messages (extended thinking)", () => {
+    let thinkingBaseId = "";
+
+    beforeAll(async () => {
+      const res = await app.fetch(new Request("http://localhost/v1/models"));
+      if (!res.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await res.json();
+      const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+      const idSet = new Set(ids);
+      // Find a claude base ID that has at least one effort suffix in the
+      // registry — that's what guarantees the rewrite path is exercised.
+      for (const id of ids) {
+        if (!id.startsWith("claude-")) continue;
+        if (/-(low|medium|high|max|xhigh)$/.test(id)) continue;
+        if (
+          idSet.has(`${id}-high`) ||
+          idSet.has(`${id}-medium`) ||
+          idSet.has(`${id}-low`)
+        ) {
+          thinkingBaseId = id;
+          break;
+        }
+      }
+    }, 20_000);
+
+    it("accepts thinking config and echoes the base model ID in the response", async () => {
+      if (!thinkingBaseId) return; // no effort-capable claude on this account
+      const response = await app.fetch(
+        new Request("http://localhost/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: thinkingBaseId,
+            max_tokens: 1024,
+            messages: [
+              {
+                role: "user",
+                content: 'Reply with exactly the word "pong" and nothing else.',
+              },
+            ],
+            // budget_tokens > 16384 → high
+            thinking: { type: "enabled", budget_tokens: 32_000 },
+          }),
+        })
+      );
+
+      expect(
+        response.status,
+        `base ${thinkingBaseId} + thinking returned ${response.status}`
+      ).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await response.json();
+      // Response must echo the base model, not the suffixed one.
+      expect(body.model).toBe(thinkingBaseId);
+      expect(body.role).toBe("assistant");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const textBlocks = body.content.filter((b: any) => b.type === "text");
+      const fullText = textBlocks.map((b: { text: string }) => b.text).join("");
+      expect(fullText.toLowerCase()).toContain("pong");
     }, 60_000);
   });
 });

@@ -414,6 +414,45 @@ describe("chat route", () => {
       expect(fullContent).toContain("stream_error");
     });
 
+    it("emits a stream_error when upstream closes with no parts", async () => {
+      // Reproduces the empty-response failure mode observed in production: the
+      // upstream SSE connection closes cleanly without yielding text, tool, or
+      // finish events. Without the guard the proxy used to emit a clean
+      // finish_reason=stop with no content, which OpenAI-compatible clients
+      // read as a deliberate empty completion.
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const response = await app.fetch(req);
+      const reader = response.body?.getReader();
+      const chunks: string[] = [];
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(new TextDecoder().decode(value));
+        }
+      }
+      const fullContent = chunks.join("");
+      expect(fullContent).toContain("stream_error");
+      expect(fullContent).toMatch(/no.*content|without producing/i);
+      // The stream still terminates cleanly so SSE consumers exit.
+      expect(fullContent).toContain("[DONE]");
+    });
+
     it("should handle stream startup failure", async () => {
       mockDoStream.mockRejectedValueOnce(new Error("Failed to connect"));
 

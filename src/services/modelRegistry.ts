@@ -191,6 +191,24 @@ export async function isModelAvailable(modelId: string): Promise<boolean> {
 }
 
 /**
+ * Anthropic publishes dated snapshot IDs (e.g. `claude-haiku-4-5-20251001`)
+ * that clients like Claude Code hard-code. The Augment backend only knows the
+ * undated canonical form (`claude-haiku-4-5`). Strip the trailing
+ * `-YYYYMMDD` suffix when the stripped form is in the registry so dated IDs
+ * route to the matching canonical model. Returns the original ID otherwise.
+ */
+const ANTHROPIC_DATE_SUFFIX = /-[0-9]{8}$/;
+
+export async function normalizeModelId(modelId: string): Promise<string> {
+  if (!modelId) return modelId;
+  const ids = await getModelIds();
+  if (ids.includes(modelId)) return modelId;
+  const stripped = modelId.replace(ANTHROPIC_DATE_SUFFIX, "");
+  if (stripped !== modelId && ids.includes(stripped)) return stripped;
+  return modelId;
+}
+
+/**
  * Map an OpenAI `reasoning_effort` value to the closest Augment effort level
  * the model actually advertises, then return the suffixed model ID. Returns
  * `undefined` when no rewrite should happen, i.e. when:

@@ -8,7 +8,11 @@ import type {
   ReasoningSummary,
 } from "../types/openai";
 import { getAugmentModel } from "../services/augmentClient";
-import { isModelAvailable, getModelIds, resolveEffortModelId } from "../services/modelRegistry";
+import {
+  isModelAvailable,
+  normalizeModelId,
+  resolveEffortModelId,
+} from "../services/modelRegistry";
 import {
   transformMessages,
   transformTools,
@@ -17,6 +21,7 @@ import {
   buildResponse,
   buildError,
 } from "../utils/transformers";
+import { attachLogData, flushLog } from "../services/logger";
 import { randomUUID } from "node:crypto";
 
 const router = new Hono();
@@ -108,16 +113,19 @@ router.post("/completions", async (c) => {
     if (!modelId) {
       return c.json(buildError("Missing required field: model"), 400);
     }
+    attachLogData(c, { model: modelId, stream: body.stream === true });
+
+    // Strip Anthropic dated snapshot suffix (e.g. claude-haiku-4-5-20251001 →
+    // claude-haiku-4-5) so dated IDs route to the canonical model the backend
+    // recognises. `modelId` keeps the client's original value for the response
+    // `model` field; `canonicalModelId` is what we use for backend lookups.
+    const canonicalModelId = await normalizeModelId(modelId);
 
     // Allow any canonical model ID even if the registry is unavailable (e.g. no CLI).
     // Canonical names always start with a known provider prefix followed by a hyphen.
     const MODEL_PATTERN = /^(claude|gpt|gemini|code)-[a-z0-9][a-z0-9-]*$/;
-    const modelAvailable = await isModelAvailable(modelId);
-    if (!modelAvailable && !MODEL_PATTERN.test(modelId)) {
-      const available = await getModelIds();
-      console.warn(
-        `[chat] 404 model not found: requested="${modelId}" available=[${available.join(", ")}]`
-      );
+    const modelAvailable = await isModelAvailable(canonicalModelId);
+    if (!modelAvailable && !MODEL_PATTERN.test(canonicalModelId)) {
       return c.json(
         buildError(
           `Model '${modelId}' is not available. Use GET /v1/models to see available models.`,
@@ -130,6 +138,7 @@ router.post("/completions", async (c) => {
 
     const requestId = generateId();
     const timestamp = Math.floor(Date.now() / 1000);
+    attachLogData(c, { requestId });
 
     const reasoningConfig = resolveReasoningConfig(body);
     const providerOptions = buildProviderOptions(reasoningConfig);
@@ -141,8 +150,11 @@ router.post("/completions", async (c) => {
     // without advertised levels pass through unchanged.
     const effectiveModelId =
       (reasoningConfig?.effort
-        ? await resolveEffortModelId(modelId, reasoningConfig.effort)
-        : undefined) ?? modelId;
+        ? await resolveEffortModelId(canonicalModelId, reasoningConfig.effort)
+        : undefined) ?? canonicalModelId;
+    if (effectiveModelId !== modelId) {
+      attachLogData(c, { effectiveModel: effectiveModelId });
+    }
 
     const modelInstance = await getAugmentModel(effectiveModelId);
     const messages = transformMessages(body.messages || []);
@@ -189,18 +201,29 @@ router.post("/completions", async (c) => {
           controller.enqueue(textEncoder.encode(`data: ${JSON.stringify(roleChunk)}\n\n`));
 
           let lastFinishReason: ChatCompletionChunk["choices"][0]["finish_reason"] = "stop";
+          // Aggregated for the structured log only — never emitted to the client.
+          let logText = "";
+          let logReasoning = "";
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const logToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let logUsage: any = undefined;
+          let logStreamError: string | undefined;
+          let sawFinish = false;
 
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             for await (const part of streamResult.fullStream as any) {
               if (part.type === "text-delta") {
                 // AI SDK v5: field is `text` (not textDelta)
+                const fragment: string = part.text ?? "";
+                logText += fragment;
                 const chunk: ChatCompletionChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
                   created: timestamp,
                   model: modelId,
-                  choices: [{ index: 0, delta: { content: part.text }, finish_reason: null }],
+                  choices: [{ index: 0, delta: { content: fragment }, finish_reason: null }],
                 };
                 controller.enqueue(textEncoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
 
@@ -211,6 +234,7 @@ router.post("/completions", async (c) => {
                   toolIdx = nextToolCallIndex++;
                   toolCallIndexMap.set(part.id, toolIdx);
                 }
+                logToolCalls[toolIdx] = { id: part.id, name: part.toolName, arguments: "" };
                 const chunk: ChatCompletionChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -233,6 +257,8 @@ router.post("/completions", async (c) => {
                   toolIdx = nextToolCallIndex++;
                   toolCallIndexMap.set(part.id, toolIdx);
                 }
+                const tc = logToolCalls[toolIdx];
+                if (tc) tc.arguments += part.delta ?? "";
                 const chunk: ChatCompletionChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -250,6 +276,7 @@ router.post("/completions", async (c) => {
                 // AI SDK v5 fullStream uses `text`; provider-level parts use `delta`.
                 const fragment: string = part.text ?? part.delta ?? "";
                 if (!fragment) continue;
+                logReasoning += fragment;
                 const chunk: ChatCompletionChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -260,19 +287,48 @@ router.post("/completions", async (c) => {
                 controller.enqueue(textEncoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
 
               } else if (part.type === "finish") {
+                sawFinish = true;
                 lastFinishReason = mapFinishReason(part.finishReason) as ChatCompletionChunk["choices"][0]["finish_reason"];
+                logUsage = part.totalUsage ?? part.usage ?? undefined;
               } else if (part.type === "error") {
                 // AI SDK v5 surfaces doStream rejections / mid-stream failures
                 // as an `error` part on fullStream.
                 const e = part.error;
                 const msg = e instanceof Error ? e.message : (e?.message ?? String(e ?? "Stream error"));
+                logStreamError = msg;
                 controller.enqueue(textEncoder.encode(`data: ${JSON.stringify({ error: { message: msg, type: "stream_error" } })}\n\n`));
               }
               // start / start-step / text-start / text-end / reasoning-start / reasoning-end / tool-input-available / finish-step → no SSE output
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : "Stream error";
+            logStreamError = msg;
             controller.enqueue(textEncoder.encode(`data: ${JSON.stringify({ error: { message: msg, type: "stream_error" } })}\n\n`));
+          }
+
+          // Upstream produced no output and no usage was reported. Mirrors the
+          // guard in src/routes/messages.ts: the Augment backend has been seen
+          // to close the SSE stream cleanly without emitting any events (or
+          // with only a synthetic finish carrying zero tokens). Without this
+          // guard the proxy would emit a clean `finish_reason: "stop"` with no
+          // content, which OpenAI-compatible clients read as a deliberate
+          // empty completion and never retry. A legitimate empty completion
+          // still reports the prompt's input tokens, so `inputTokens === 0`
+          // together with no text/reasoning/tool output is a reliable
+          // upstream-failure signal.
+          const upstreamInputTokens = logUsage?.promptTokens ?? logUsage?.inputTokens ?? 0;
+          const upstreamOutputTokens = logUsage?.completionTokens ?? logUsage?.outputTokens ?? 0;
+          const upstreamEmpty =
+            logText === "" &&
+            logReasoning === "" &&
+            logToolCalls.length === 0 &&
+            upstreamInputTokens === 0 &&
+            upstreamOutputTokens === 0;
+          if (upstreamEmpty && !logStreamError) {
+            logStreamError = sawFinish
+              ? "Upstream finished stream with no content and no usage"
+              : "Upstream closed stream without producing any content";
+            controller.enqueue(textEncoder.encode(`data: ${JSON.stringify({ error: { message: logStreamError, type: "stream_error" } })}\n\n`));
           }
 
           // Final chunk with finish_reason, then [DONE]
@@ -285,6 +341,27 @@ router.post("/completions", async (c) => {
           };
           controller.enqueue(textEncoder.encode(`data: ${JSON.stringify(finalChunk)}\n\n`));
           controller.enqueue(textEncoder.encode("data: [DONE]\n\n"));
+
+          // Emit the structured log line now — the response status is 200 by
+          // the time the stream is being consumed by the client.
+          const inputTokens = logUsage?.promptTokens ?? logUsage?.inputTokens;
+          const outputTokens = logUsage?.completionTokens ?? logUsage?.outputTokens;
+          attachLogData(c, {
+            usage: logUsage ? {
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+              total_tokens: logUsage.totalTokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0)),
+            } : undefined,
+            response: {
+              id: requestId,
+              finish_reason: lastFinishReason,
+              content: logText || undefined,
+              reasoning_content: logReasoning || undefined,
+              tool_calls: logToolCalls.length > 0 ? logToolCalls : undefined,
+            },
+            ...(logStreamError && { error: logStreamError }),
+          });
+          flushLog(c, 200);
           controller.close();
         },
       });
@@ -354,9 +431,18 @@ router.post("/completions", async (c) => {
         total_tokens: usage.totalTokens ?? ((usage.promptTokens ?? usage.inputTokens ?? 0) + (usage.completionTokens ?? usage.outputTokens ?? 0)),
       };
 
+      attachLogData(c, {
+        usage: {
+          input_tokens: response.usage.prompt_tokens,
+          output_tokens: response.usage.completion_tokens,
+          total_tokens: response.usage.total_tokens,
+        },
+        response,
+      });
       return c.json(response);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Generation failed";
+      attachLogData(c, { error: errorMessage });
       return c.json(buildError(errorMessage, "server_error", 500), 500);
     }
   } catch (err) {

@@ -390,6 +390,53 @@ describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
   });
 });
 
+describe("normalizeModelId", () => {
+  let execFileMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const cp = await import("node:child_process");
+    execFileMock = cp.execFile as unknown as ReturnType<typeof vi.fn>;
+    execFileMock.mockReset();
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: object, cb: Function) =>
+        cb(null, SAMPLE_CLI_OUTPUT)
+    );
+  });
+
+  it("strips an Anthropic dated snapshot suffix when the stripped form is registered", async () => {
+    const { normalizeModelId } = await import("../services/modelRegistry");
+    // Claude Code sends dated IDs like this; the registry only knows the undated form.
+    expect(await normalizeModelId("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5");
+    expect(await normalizeModelId("claude-sonnet-4-6-20250101")).toBe("claude-sonnet-4-6");
+    expect(await normalizeModelId("claude-opus-4-7-20250930")).toBe("claude-opus-4-7");
+  });
+
+  it("returns registered IDs unchanged", async () => {
+    const { normalizeModelId } = await import("../services/modelRegistry");
+    expect(await normalizeModelId("claude-haiku-4-5")).toBe("claude-haiku-4-5");
+    expect(await normalizeModelId("gpt-5-1")).toBe("gpt-5-1");
+  });
+
+  it("leaves an unknown ID alone when the stripped form is also unknown", async () => {
+    const { normalizeModelId } = await import("../services/modelRegistry");
+    expect(await normalizeModelId("claude-mystery-99-20251001")).toBe("claude-mystery-99-20251001");
+  });
+
+  it("does not strip a non-date numeric suffix (wrong digit count)", async () => {
+    const { normalizeModelId } = await import("../services/modelRegistry");
+    // 7 digits — not a valid date snapshot, must pass through unchanged.
+    expect(await normalizeModelId("claude-haiku-4-5-2025100")).toBe("claude-haiku-4-5-2025100");
+    // 9 digits — likewise.
+    expect(await normalizeModelId("claude-haiku-4-5-202510010")).toBe("claude-haiku-4-5-202510010");
+  });
+
+  it("returns empty input unchanged", async () => {
+    const { normalizeModelId } = await import("../services/modelRegistry");
+    expect(await normalizeModelId("")).toBe("");
+  });
+});
+
 // ── expandShortName unit tests (pure function, no mocking needed) ──────────
 import { expandShortName } from "../services/modelRegistry";
 

@@ -7,3 +7,36 @@ config();
 
 export const PORT = parseInt(process.env.PORT || "7888", 10);
 export const HOST = process.env.HOST || "localhost";
+
+// Structured-logging verbosity. `LOGGING` (alias `LOG_LEVEL`) accepts:
+//   - "none" / "off" / "silent" → no per-request log lines
+//   - "info"                    → one JSON line per request with method, path,
+//                                 status, durationMs, model, usage (default)
+//   - "body"                    → "info" plus full request and response bodies
+//                                 (stream responses are summarised after close)
+export type LogLevel = "none" | "info" | "body";
+
+function parseLogLevel(raw: string | undefined): LogLevel {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "info") return "info";
+  if (v === "none" || v === "off" || v === "silent") return "none";
+  if (v === "body" || v === "debug" || v === "verbose") return "body";
+  return "info";
+}
+
+export const LOG_LEVEL: LogLevel = parseLogLevel(
+  process.env.LOGGING ?? process.env.LOG_LEVEL
+);
+
+// Output shape for log records. `text` (default) emits a human-readable
+// single line — best for local development and tailing. `json` emits one
+// JSON object per line — best for machine ingestion (jq, Loki, Vector).
+export type LogFormat = "json" | "text";
+
+function parseLogFormat(raw: string | undefined): LogFormat {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "json") return "json";
+  return "text";
+}
+
+export const LOG_FORMAT: LogFormat = parseLogFormat(process.env.LOG_FORMAT);

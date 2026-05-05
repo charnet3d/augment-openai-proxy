@@ -1,11 +1,13 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { HOST, PORT } from "./config";
 import chatRouter from "./routes/chat";
+import messagesRouter from "./routes/messages";
 import modelsRouter from "./routes/models";
 import { validateCredentials } from "./services/augmentClient";
+import { installHttpAgent } from "./services/httpAgent";
+import { loggingMiddleware } from "./services/logger";
 
 const app = new Hono();
 
@@ -13,7 +15,7 @@ const app = new Hono();
 app.use("*", cors({
   origin: process.env.CORS_ORIGIN || "*",
 }));
-app.use("*", logger());
+app.use("*", loggingMiddleware());
 
 // Health check
 app.get("/", (c) => {
@@ -28,9 +30,11 @@ app.get("/", (c) => {
 app.route("/v1/chat", chatRouter);
 app.route("/v1/models", modelsRouter);
 
+// Anthropic-compatible routes (Claude Code, Anthropic SDK, etc.)
+app.route("/v1/messages", messagesRouter);
+
 // 404 handler
 app.notFound((c) => {
-  console.warn(`[router] 404 no route matched: ${c.req.method} ${c.req.url}`);
   return c.json(
     {
       error: {
@@ -45,6 +49,11 @@ app.notFound((c) => {
 
 // Start server
 async function main() {
+  // Install a global undici dispatcher before any fetch happens. The Augment
+  // SDK uses Node's global fetch with no timeout overrides, so without this
+  // long thinking calls fail with UND_ERR_HEADERS_TIMEOUT after 5 minutes.
+  installHttpAgent();
+
   // Check credentials
   const credentialsValid = await validateCredentials();
   if (!credentialsValid) {
@@ -76,9 +85,10 @@ function printBanner() {
   console.log("╔══════════════════════════════════════════════════════════════════════════════╗");
   console.log("║     Augment Open Proxy is running                                            ║");
   console.log("╠══════════════════════════════════════════════════════════════════════════════╣");
-  console.log(`║  URL:  http://${HOST}:${PORT}`);
-  console.log(`║  Chat: http://${HOST}:${PORT}/v1/chat/completions`);
-  console.log(`║  Models: http://${HOST}:${PORT}/v1/models`);
+  console.log(`║  URL:      http://${HOST}:${PORT}`);
+  console.log(`║  Chat:     http://${HOST}:${PORT}/v1/chat/completions`);
+  console.log(`║  Messages: http://${HOST}:${PORT}/v1/messages`);
+  console.log(`║  Models:   http://${HOST}:${PORT}/v1/models`);
   console.log("╚══════════════════════════════════════════════════════════════════════════════╝");
   console.log("");
 }

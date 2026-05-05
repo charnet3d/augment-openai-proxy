@@ -94,6 +94,24 @@ router.post("/", async (c) => {
       );
     }
 
+    // The Augment SDK closes a turn into chat_history on every assistant
+    // message; a trailing assistant message therefore serializes to an empty
+    // current `message`/`nodes` payload, which /chat-stream rejects as
+    // `400 Bad Request - {"error":"Unidentified internal error"}`. Reject
+    // up front with a useful message. Note: this disallows Anthropic-style
+    // assistant prefill — the upstream backend has no equivalent affordance.
+    const lastMsg = body.messages?.at(-1);
+    if (lastMsg?.role === "assistant") {
+      return c.json(
+        buildError(
+          "Conversation must end with a user message; got trailing 'assistant' message. The Augment backend does not support assistant prefill (continuing an in-progress assistant turn).",
+          "invalid_request_error",
+          400
+        ),
+        400
+      );
+    }
+
     const requestId = generateId();
     attachLogData(c, { requestId });
 

@@ -154,6 +154,56 @@ describe("messages route (Anthropic API)", () => {
       const body: any = await (await app.fetch(req)).json();
       expect(body.model).toBe("claude-haiku-4-5-20251001");
     });
+
+    it("rejects request whose last message is an assistant message", async () => {
+      // The Augment SDK serialises a trailing-assistant conversation to an
+      // empty current message, which the upstream backend rejects with
+      // `400 Bad Request - {"error":"Unidentified internal error"}`. The
+      // proxy must short-circuit before issuing the upstream call. This also
+      // disallows Anthropic-style assistant prefill, which the backend has
+      // no equivalent affordance for.
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [
+            { role: "user", content: "Say hi" },
+            { role: "assistant", content: "Hi" },
+          ],
+        }),
+      });
+
+      const res = await app.fetch(req);
+      const body: any = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.message).toContain("assistant");
+      expect(mockDoGenerate).not.toHaveBeenCalled();
+      expect(mockDoStream).not.toHaveBeenCalled();
+    });
+
+    it("rejects trailing-assistant even when stream=true", async () => {
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          stream: true,
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "hello" },
+          ],
+        }),
+      });
+
+      const res = await app.fetch(req);
+      expect(res.status).toBe(400);
+      expect(mockDoStream).not.toHaveBeenCalled();
+    });
   });
 
   describe("non-streaming response", () => {

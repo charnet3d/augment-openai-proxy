@@ -123,6 +123,53 @@ describe("chat route", () => {
       const response = await app.fetch(req);
       expect(response.status).toBe(500);
     });
+
+    it("rejects request whose last message is an assistant message", async () => {
+      // The Augment SDK serialises a trailing-assistant conversation to an
+      // empty current message, which /chat-stream rejects upstream as
+      // `400 Bad Request - {"error":"Unidentified internal error"}`. The
+      // proxy must short-circuit before issuing the upstream call.
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [
+            { role: "user", content: "Say hi" },
+            { role: "assistant", content: "Hi" },
+          ],
+        }),
+      });
+
+      const response = await app.fetch(req);
+      const body: any = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.message).toContain("assistant");
+      // SDK must not be touched.
+      expect(mockDoGenerate).not.toHaveBeenCalled();
+      expect(mockDoStream).not.toHaveBeenCalled();
+    });
+
+    it("rejects trailing-assistant even when stream=true", async () => {
+      const req = new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          stream: true,
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "hello" },
+          ],
+        }),
+      });
+
+      const response = await app.fetch(req);
+      expect(response.status).toBe(400);
+      expect(mockDoStream).not.toHaveBeenCalled();
+    });
   });
 
   describe("non-streaming response", () => {

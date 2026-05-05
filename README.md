@@ -309,6 +309,43 @@ Same record, `json` format:
 - **No audio input** — audio content parts are not supported.
 - **Rate limits** — subject to your Augment account tier.
 
+## Note about some prompts
+
+Certain user prompts cause `claude-sonnet-4-6` to hang at the Augment
+backend: the upstream `chat-stream` endpoint accepts the connection,
+returns `200 OK` headers, then writes zero body bytes. Other prompts on
+the same proxy, credentials, and model continue to succeed, so this is a
+prompt-content issue at the upstream — not the proxy, the account, or the
+request size.
+
+Reproducer: Originally [`scripts/prompt-causing-issue.md`](scripts/prompt-causing-issue.md)
+ a 21-line "3d Rubik's in an HTML file" request. But the issue
+was reproduced even with a one sentence prompt: "build a 3d rubiks cube in an html file". It fails
+identically through:
+
+- Claude Code (full system prompt + 50+ tools, ~125 KB body)
+- pi-agent (minimal system prompt, no tools, ~1 KB body)
+- OpenWebUI (no agent wrapper at all)
+- raw `curl` against `/v1/messages` and `/v1/chat/completions`
+- **More importantly**: The official Augment VS Code extension, not using this proxy.
+
+How it surfaces:
+
+- After roughly 5–6 minutes the **backend** ends the stream early —
+  it sends a terminal frame with no content and `input_tokens = 0`
+  (no usage at all). This is not a client- or proxy-side timeout.
+
+Workarounds:
+
+- Reword the prompt; some simpler variations worked but no general pattern
+  emerged.
+- Switch to `claude-sonnet-4-5` or `claude-sonnet-4` for the same
+  prompt — both return normally.
+
+If you can reproduce against your own tenant, share the failing `req=` id
+from the proxy log with Augment support — they have the upstream traces
+that the proxy does not.
+
 ## Troubleshooting
 
 | Problem | Fix |

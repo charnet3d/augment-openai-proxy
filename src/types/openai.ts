@@ -37,7 +37,9 @@ export type ChatCompletionContentPart =
   | ChatCompletionContentPartImage;
 
 export interface ChatCompletionMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  // `developer` is OpenAI's o-series rename of `system` (and is accepted as a
+  // synonym for system on non-reasoning models). Treated identically to system.
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content: string | ChatCompletionContentPart[] | null;
   tool_calls?: ChatCompletionToolCall[];
   tool_call_id?: string;

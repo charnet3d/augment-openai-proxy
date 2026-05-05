@@ -146,6 +146,9 @@ export function transformMessages(messages: ChatCompletionMessage[]): CoreMessag
   return messages.flatMap((msg): CoreMessage[] => {
     switch (msg.role) {
       case "system":
+      case "developer":
+        // `developer` is the o-series rename of `system`; OpenAI treats them
+        // as equivalent on non-reasoning models. The AI SDK only has `system`.
         return [{ role: "system", content: contentToText(msg.content) }];
 
       case "user":

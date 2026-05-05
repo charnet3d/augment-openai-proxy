@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { parseTimeoutMs, readTimeoutsFromEnv } from "../services/httpAgent";
+import { describe, it, expect, afterAll } from "vitest";
+import { getGlobalDispatcher, setGlobalDispatcher } from "undici";
+import {
+  parseTimeoutMs,
+  readTimeoutsFromEnv,
+  installHttpAgent,
+} from "../services/httpAgent";
 
 describe("parseTimeoutMs", () => {
   it("returns the fallback when the env var is missing", () => {
@@ -60,5 +65,28 @@ describe("readTimeoutsFromEnv", () => {
     });
     expect(t.headersTimeout).toBe(0);
     expect(t.bodyTimeout).toBe(0);
+  });
+});
+
+
+describe("installHttpAgent", () => {
+  // Snapshot whatever dispatcher is currently global so we restore it after
+  // mutating the process-wide state. Other tests may rely on the default.
+  const original = getGlobalDispatcher();
+  afterAll(() => {
+    setGlobalDispatcher(original);
+  });
+
+  it("installs a new global undici dispatcher", () => {
+    installHttpAgent({ headersTimeout: 1000, bodyTimeout: 2000, connectTimeout: 3000 });
+    const after = getGlobalDispatcher();
+    expect(after).toBeDefined();
+    // The replacement must not be the dispatcher we captured before installing.
+    expect(after).not.toBe(original);
+  });
+
+  it("uses the env-derived defaults when called with no args", () => {
+    expect(() => installHttpAgent()).not.toThrow();
+    expect(getGlobalDispatcher()).toBeDefined();
   });
 });

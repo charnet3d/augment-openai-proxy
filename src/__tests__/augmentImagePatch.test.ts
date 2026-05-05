@@ -133,6 +133,157 @@ describe("augmentImagePatch", () => {
       expect(out.nodes[0].type).toBe(0);
     });
 
+    it("emits System: prefix from a system message and joins it with the user text", () => {
+      const out = buildChatRequestWithImages(
+        [
+          { role: "system", content: [{ type: "text", text: "be brief" }] },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "hello" },
+              { type: "file", data: "AAAA", mediaType: "image/png" },
+            ],
+          },
+        ],
+        undefined,
+      );
+      // System prepends a TEXT node with `System: ` prefix.
+      expect(out.nodes[0]).toMatchObject({ type: 0, text_node: { content: "System: be brief" } });
+      // Final concatenated message keeps both contributions, separated by a blank line.
+      expect(out.message).toContain("System: be brief");
+      expect(out.message).toContain("hello");
+    });
+
+    it("ignores empty system messages", () => {
+      const out = buildChatRequestWithImages(
+        [
+          { role: "system", content: "" },
+          { role: "user", content: [{ type: "file", data: "x", mediaType: "image/png" }] },
+        ],
+        undefined,
+      );
+      // Only the IMAGE node is present — no synthetic system text node.
+      expect(out.nodes).toHaveLength(1);
+      expect(out.nodes[0].type).toBe(2);
+    });
+
+    it("converts a tool-result message to a TOOL_RESULT node with text output", () => {
+      const out = buildChatRequestWithImages(
+        [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call_1",
+                output: { type: "text", value: "42" },
+              },
+            ],
+          },
+          { role: "user", content: [{ type: "file", data: "x", mediaType: "image/png" }] },
+        ],
+        undefined,
+      );
+      const trNode = out.nodes.find((n: any) => n.type === 1);
+      expect(trNode).toBeDefined();
+      expect(trNode.tool_result_node).toEqual({
+        tool_use_id: "call_1",
+        content: "42",
+        is_error: false,
+      });
+    });
+
+    it("serialises every tool-result output variant", () => {
+      const out = buildChatRequestWithImages(
+        [
+          {
+            role: "tool",
+            content: [
+              { type: "tool-result", toolCallId: "j", output: { type: "json", value: { ok: 1 } } },
+              { type: "tool-result", toolCallId: "et", output: { type: "error-text", value: "boom" } },
+              { type: "tool-result", toolCallId: "ej", output: { type: "error-json", value: { code: 1 } } },
+              {
+                type: "tool-result",
+                toolCallId: "c",
+                output: {
+                  type: "content",
+                  value: [
+                    { type: "text", text: "a" },
+                    { type: "image", data: "x" },
+                    { type: "text", text: "b" },
+                  ],
+                },
+              },
+            ],
+          },
+          { role: "user", content: [{ type: "file", data: "x", mediaType: "image/png" }] },
+        ],
+        undefined,
+      );
+      const trNodes = out.nodes.filter((n: any) => n.type === 1);
+      expect(trNodes).toHaveLength(4);
+      expect(trNodes[0].tool_result_node).toMatchObject({ tool_use_id: "j", content: '{"ok":1}', is_error: false });
+      expect(trNodes[1].tool_result_node).toMatchObject({ tool_use_id: "et", content: "boom", is_error: true });
+      expect(trNodes[2].tool_result_node).toMatchObject({ tool_use_id: "ej", content: '{"code":1}', is_error: true });
+      expect(trNodes[3].tool_result_node.content).toBe("a\nb");
+    });
+
+    it("emits an assistant turn's text, tool-call, and reasoning parts as response_nodes", () => {
+      const out = buildChatRequestWithImages(
+        [
+          {
+            role: "user",
+            content: [{ type: "file", data: "AAAA", mediaType: "image/png" }],
+          },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "answer " },
+              { type: "tool-call", toolCallId: "c1", toolName: "search", input: { q: "x" } },
+              { type: "reasoning", text: "thinking..." },
+            ],
+          },
+          { role: "user", content: [{ type: "text", text: "follow up" }] },
+        ],
+        undefined,
+      );
+      expect(out.chatHistory).toHaveLength(1);
+      const respNodes = out.chatHistory[0].response_nodes;
+      expect(respNodes.find((n: any) => n.type === 0 /* RAW_RESPONSE */)).toMatchObject({
+        content: "answer ",
+      });
+      expect(respNodes.find((n: any) => n.type === 5 /* TOOL_USE */).tool_use).toMatchObject({
+        tool_use_id: "c1",
+        tool_name: "search",
+        input_json: '{"q":"x"}',
+      });
+      expect(respNodes.find((n: any) => n.type === 8 /* THINKING */).thinking).toEqual({
+        content: "thinking...",
+      });
+      expect(out.chatHistory[0].response_text).toBe("answer ");
+    });
+
+    it("stringifies an assistant tool-call whose input is already a JSON string", () => {
+      const out = buildChatRequestWithImages(
+        [
+          {
+            role: "user",
+            content: [{ type: "file", data: "AAAA", mediaType: "image/png" }],
+          },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool-call", toolCallId: "c1", toolName: "search", input: '{"q":"x"}' },
+            ],
+          },
+          { role: "user", content: [{ type: "text", text: "ok" }] },
+        ],
+        undefined,
+      );
+      const tu = out.chatHistory[0].response_nodes.find((n: any) => n.type === 5);
+      expect(tu.tool_use.input_json).toBe('{"q":"x"}');
+    });
+
     it("converts function tool definitions to Augment shape", () => {
       const out = buildChatRequestWithImages(
         [{ role: "user", content: [{ type: "file", data: "x", mediaType: "image/png" }] }],

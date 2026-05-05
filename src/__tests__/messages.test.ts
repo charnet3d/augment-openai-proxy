@@ -323,6 +323,29 @@ describe("messages route (Anthropic API)", () => {
       expect(body.stop_reason).toBe("max_tokens");
     });
 
+    it("recovers from a tool_use input that is a non-JSON string", async () => {
+      mockDoGenerate.mockResolvedValueOnce({
+        content: [
+          { type: "tool-call", toolCallId: "c1", toolName: "fn", input: "not-json" },
+        ],
+        finishReason: "tool-calls",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+      const body: any = await (await app.fetch(req)).json();
+      const tu = body.content.find((b: any) => b.type === "tool_use");
+      // safeParse keeps the original string when JSON.parse throws.
+      expect(tu.input).toBe("not-json");
+    });
+
     it("returns server_error envelope on generation failure", async () => {
       mockDoGenerate.mockRejectedValueOnce(new Error("boom"));
       const req = new Request("http://localhost/v1/messages", {
@@ -543,6 +566,212 @@ describe("messages route (Anthropic API)", () => {
       expect(events[events.length - 1].type).toBe("message_stop");
     });
 
+    it("closes the open text block when a reasoning-delta arrives mid-stream", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "Hello" });
+          controller.enqueue({ type: "reasoning-start", id: "r1" });
+          controller.enqueue({ type: "reasoning-delta", id: "r1", delta: "wait" });
+          controller.enqueue({ type: "reasoning-end", id: "r1" });
+          controller.enqueue({ type: "text-start", id: "t2" });
+          controller.enqueue({ type: "text-delta", id: "t2", delta: " world" });
+          controller.enqueue({ type: "text-end", id: "t2" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 2 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const res = await app.fetch(req);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      const events = parseSse(chunks.join(""));
+      // Sequence per index: text(0) start → delta → stop, thinking(1) start →
+      // delta → stop, text(2) start → delta → stop.
+      const startIndices = events.filter((e) => e.type === "content_block_start").map((e) => e.index);
+      expect(startIndices).toEqual([0, 1, 2]);
+      const stopIndices = events.filter((e) => e.type === "content_block_stop").map((e) => e.index);
+      expect(stopIndices).toContain(0);
+      expect(stopIndices).toContain(1);
+    });
+
+    it("closes both text and thinking blocks when a tool-input-start arrives", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "before" });
+          controller.enqueue({ type: "reasoning-start", id: "r1" });
+          controller.enqueue({ type: "reasoning-delta", id: "r1", delta: "ponder" });
+          controller.enqueue({ type: "tool-input-start", id: "call_1", toolName: "fn" });
+          controller.enqueue({ type: "tool-input-delta", id: "call_1", delta: "{}" });
+          controller.enqueue({ type: "tool-input-end", id: "call_1" });
+          controller.enqueue({ type: "finish", finishReason: "tool-calls", usage: { inputTokens: 1, outputTokens: 1 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const res = await app.fetch(req);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      const events = parseSse(chunks.join(""));
+      // The text block (idx 0) and thinking block (idx 1) must both be closed
+      // before the tool_use block opens (idx 2).
+      const stops = events
+        .filter((e) => e.type === "content_block_stop")
+        .map((e) => e.index);
+      expect(stops).toEqual(expect.arrayContaining([0, 1, 2]));
+      const last = events.find((e) => e.type === "message_delta");
+      expect(last.delta.stop_reason).toBe("tool_use");
+    });
+
+    it("ignores tool-input-delta events whose id has no open block", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          // No tool-input-start, so the orphan delta has nowhere to go.
+          controller.enqueue({ type: "tool-input-delta", id: "ghost", delta: "{}" });
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "ok" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const res = await app.fetch(req);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      const events = parseSse(chunks.join(""));
+      // The orphan delta produces no input_json_delta, only the text path emits.
+      const inputDeltas = events.filter(
+        (e) => e.type === "content_block_delta" && e.delta?.type === "input_json_delta",
+      );
+      expect(inputDeltas).toHaveLength(0);
+    });
+
+    it("catches a thrown error during stream iteration and emits stream_error", async () => {
+      // The stream rejects mid-iteration — exercises the try/catch around the
+      // for-await loop in handleStreaming.
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "ok" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.error(new Error("upstream socket reset"));
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const res = await app.fetch(req);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      const events = parseSse(chunks.join(""));
+      const err = events.find((e) => e.type === "error");
+      expect(err).toBeDefined();
+      expect(err.error.type).toBe("stream_error");
+    });
+
+    it("propagates an upstream error part as an SSE error event", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "text-start", id: "t1" });
+          controller.enqueue({ type: "text-delta", id: "t1", delta: "partial" });
+          controller.enqueue({ type: "text-end", id: "t1" });
+          controller.enqueue({ type: "error", error: new Error("upstream rejected") });
+          // Still emit a finish so the empty-stream guard does not fire.
+          controller.enqueue({ type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } });
+          controller.close();
+        },
+      });
+      mockDoStream.mockResolvedValueOnce({ stream });
+
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      });
+      const res = await app.fetch(req);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      const events = parseSse(chunks.join(""));
+      const err = events.find((e) => e.type === "error");
+      expect(err).toBeDefined();
+      expect(err.error.type).toBe("stream_error");
+      expect(err.error.message).toBe("upstream rejected");
+    });
+
     it("emits thinking_delta events for reasoning-delta parts", async () => {
       const stream = new ReadableStream({
         start(controller) {
@@ -586,7 +815,31 @@ describe("messages route (Anthropic API)", () => {
     });
   });
 
+  describe("top-level error handling", () => {
+    it("returns a 500 envelope when the request body is not valid JSON", async () => {
+      const req = new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      });
+      const res = await app.fetch(req);
+      const body: any = await res.json();
+      expect(res.status).toBe(500);
+      expect(body.error).toBeDefined();
+    });
+  });
+
   describe("count_tokens", () => {
+    it("returns a 500 envelope when the request body is not valid JSON", async () => {
+      const req = new Request("http://localhost/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{nope",
+      });
+      const res = await app.fetch(req);
+      expect(res.status).toBe(500);
+    });
+
     it("returns an estimated input_tokens value", async () => {
       const req = new Request("http://localhost/v1/messages/count_tokens", {
         method: "POST",

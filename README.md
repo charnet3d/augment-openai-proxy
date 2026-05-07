@@ -53,10 +53,15 @@ npx tsx src/index.ts
 
 The server starts on `http://localhost:7888` by default.
 
-### Run with Docker Compose
+### Run with Docker
 
-A `docker-compose.yml` is included. It runs the proxy inside a Node 22 Alpine
-container with your local source mounted, so no separate build step is needed.
+A `Dockerfile` is included for users who prefer to build and manage the image
+directly with the Docker CLI.
+
+```bash
+# Build the image
+docker build -t augment-open-proxy .
+```
 
 **Session-based auth** (recommended — uses `auggie login`):
 
@@ -64,14 +69,54 @@ container with your local source mounted, so no separate build step is needed.
 # 1. Authenticate on the host once
 auggie login
 
-# 2. Start the proxy (your ~/.augment session is mounted read-only)
-docker compose up
+# 2. Run the container (your ~/.augment session is mounted read-only)
+docker run -d \
+  --name augment-open-proxy \
+  -p 7888:7888 \
+  -e AOP_HOST=0.0.0.0 \
+  -v "$HOME/.augment:/root/.augment:ro" \
+  augment-open-proxy
 ```
 
 **Token-based auth** (CI / headless environments):
 
 ```bash
-AUGMENT_API_TOKEN=<token> AUGMENT_API_URL=<url> docker compose up
+docker run -d \
+  --name augment-open-proxy \
+  -p 7888:7888 \
+  -e AOP_HOST=0.0.0.0 \
+  -e AUGMENT_API_TOKEN=<token> \
+  -e AUGMENT_API_URL=<url> \
+  augment-open-proxy
+```
+
+Override the port by changing both sides of `-p` and passing `-e AOP_PORT=<n>`.
+
+```bash
+docker logs -f augment-open-proxy   # tail logs
+docker stop augment-open-proxy      # stop
+docker rm augment-open-proxy        # remove container
+```
+
+### Run with Docker Compose
+
+A `docker-compose.yml` is included. It builds the image from the local
+`Dockerfile` and starts the proxy with a single command.
+
+**Session-based auth** (recommended — uses `auggie login`):
+
+```bash
+# 1. Authenticate on the host once
+auggie login
+
+# 2. Build and start the proxy (only session.json is mounted read-only)
+docker compose up --build
+```
+
+**Token-based auth** (CI / headless environments):
+
+```bash
+AUGMENT_API_TOKEN=<token> AUGMENT_API_URL=<url> docker compose up --build
 ```
 
 The proxy is available at `http://localhost:7888` once the health-check passes.
@@ -79,7 +124,7 @@ Override the port with `AOP_PORT=<n> docker compose up`.
 
 To run in the background:
 ```bash
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f   # tail logs
 docker compose down      # stop
 ```

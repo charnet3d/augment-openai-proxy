@@ -15,16 +15,21 @@
 import { generateText } from "ai";
 import { AugmentLanguageModel, resolveAugmentCredentials } from "@augmentcode/auggie-sdk";
 
-// Round 2: only opus 4.6 (which advertises Low/Medium/High/Max but rejected
-// every lowercase-suffix variant). Probe alternative casings/separators.
-const BASES = ["claude-opus-4-6"];
+// Round 3: all models that advertise effortLevels in the registry.
+// Union of declared levels across all models:
+//   Low, Medium, High, xHigh, Max
+// (xHigh is Opus 4.7 only; Low/Max absent from Opus 4.7)
+// Probing all casings/separators in case undocumented variants exist.
+const BASES = [
+  "claude-opus-4-6",        // effortLevels: Low, Medium, High, Max
+  "claude-opus-4-6-500k",   // effortLevels: Low, Medium, High, Max
+  "claude-opus-4-7",        // effortLevels: Medium, High, xHigh
+  "claude-opus-4-7-500k",   // effortLevels: High
+  "claude-sonnet-4-6-500k", // effortLevels: Low, Medium, High, Max
+];
 const SUFFIXES = [
   "",
-  "-Low", "-Medium", "-High", "-Max",       // CLI casing as-is
-  "-LOW", "-MEDIUM", "-HIGH", "-MAX",       // upper
-  "_low", "_medium", "_high", "_max",       // underscore
-  "-effort-low", "-effort-medium", "-effort-high", "-effort-max",
-  "-low-effort", "-medium-effort", "-high-effort", "-max-effort",
+  "-Low", "-Medium", "-High", "-xHigh", "-Max",       // CLI casing as-is
 ];
 
 const creds = await resolveAugmentCredentials();

@@ -4,7 +4,7 @@ OpenAI- and Anthropic-compatible HTTP proxy that routes requests through the Aug
 
 ## Prerequisites
 
-- **Node.js** 20 or later
+- **Node.js** 22 or later
 - **Augment account** — authenticate via CLI:
   ```bash
   auggie login
@@ -22,21 +22,21 @@ npm install
 Copy `.env.example` to `.env` and set your values:
 
 ```env
-PORT=7888
-HOST=localhost
+AOP_PORT=7888
+AOP_HOST=localhost
 AUGMENT_API_TOKEN=
 AUGMENT_API_URL=
 ```
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | No | Server port (default: `7888`) |
-| `HOST` | No | Bind address (default: `localhost`) |
+| `AOP_PORT` | No | Server port (default: `7888`) |
+| `AOP_HOST` | No | Bind address (default: `localhost`) |
 | `AUGMENT_API_TOKEN` | No | API token for authentication. Falls back to `auggie login` session if omitted. |
 | `AUGMENT_API_URL` | No | Tenant-specific API URL. Required when `AUGMENT_API_TOKEN` is set. |
-| `AUGMENT_DISABLE_EFFORT_MODELS` | No | Comma- or whitespace-separated list of base model IDs (or CLI short names) whose effort variants should be hidden from `/v1/models` and not used for `reasoning_effort` rewriting. See [Reasoning effort](#reasoning-effort). |
-| `LOGGING` | No | Per-request logging verbosity. `none` (silent), `info` (one line per request: method, path, status, durationMs, model, requestId, usage — default), or `body` (`info` plus full request and assembled response payloads). See [Structured logging](#structured-logging). |
-| `LOG_FORMAT` | No | Output shape for log records: `text` (human-readable single line, default) or `json` (single-line JSON per record). See [Structured logging](#structured-logging). |
+| `AOP_DISABLE_EFFORT_MODELS` | No | Comma- or whitespace-separated list of base model IDs (or CLI short names) whose effort variants should be hidden from `/v1/models` and not used for `reasoning_effort` rewriting. See [Reasoning effort](#reasoning-effort). |
+| `AOP_LOGGING` | No | Per-request logging verbosity. `none` (silent), `info` (one line per request: method, path, status, durationMs, model, requestId, usage — default), or `body` (`info` plus full request and assembled response payloads). See [Structured logging](#structured-logging). |
+| `AOP_LOG_FORMAT` | No | Output shape for log records: `text` (human-readable single line, default) or `json` (single-line JSON per record). See [Structured logging](#structured-logging). |
 
 ## Usage
 
@@ -49,6 +49,37 @@ npx tsx src/index.ts
 ```
 
 The server starts on `http://localhost:7888` by default.
+
+### Run with Docker Compose
+
+A `docker-compose.yml` is included. It runs the proxy inside a Node 22 Alpine
+container with your local source mounted, so no separate build step is needed.
+
+**Session-based auth** (recommended — uses `auggie login`):
+
+```bash
+# 1. Authenticate on the host once
+auggie login
+
+# 2. Start the proxy (your ~/.augment session is mounted read-only)
+docker compose up
+```
+
+**Token-based auth** (CI / headless environments):
+
+```bash
+AUGMENT_API_TOKEN=<token> AUGMENT_API_URL=<url> docker compose up
+```
+
+The proxy is available at `http://localhost:7888` once the health-check passes.
+Override the port with `AOP_PORT=<n> docker compose up`.
+
+To run in the background:
+```bash
+docker compose up -d
+docker compose logs -f   # tail logs
+docker compose down      # stop
+```
 
 ### curl examples
 
@@ -147,6 +178,69 @@ Tool calling (function calling) is supported via the Augment SDK:
 }
 ```
 
+### `POST /v1/responses`
+
+OpenAI Responses API endpoint. Accepts the Responses-API request body and
+returns either a `ResponseObject` (non-streaming) or the standard Responses-API
+SSE event sequence (streaming).
+
+**Request body:**
+```json
+{
+  "model": "claude-sonnet-4-5",
+  "input": [
+    { "role": "user", "content": "Explain TypeScript generics." }
+  ],
+  "stream": true
+}
+```
+
+The `input` field accepts either a plain string or an array of input items
+(`message`, `function_call`, `function_call_output`, `reasoning`). The
+optional `instructions` field sets a system prompt.
+
+**Response (non-streaming):** A `ResponseObject` with `output` containing
+`message`, `function_call`, and/or `reasoning` output items.
+
+**Response (streaming):** Responses-API SSE event sequence —
+`response.created` → `response.in_progress` → `response.output_item.added`
+→ content/argument deltas (`response.output_text.delta`,
+`response.reasoning_summary_text.delta`, `response.function_call_arguments.delta`)
+→ `response.output_item.done` → `response.completed`.
+
+**Tool calling:**
+```json
+{
+  "model": "claude-sonnet-4-5",
+  "input": [{ "role": "user", "content": "What's the weather in SF?" }],
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Get the current weather",
+      "parameters": {
+        "type": "object",
+        "properties": { "location": { "type": "string" } },
+        "required": ["location"]
+      }
+    }
+  ]
+}
+```
+
+Note: unlike the Chat Completions API, Responses-API tools use a **flat**
+shape — `name`, `description`, and `parameters` are top-level fields, not
+nested under a `function` key.
+
+**Reasoning** (`reasoning.effort` / `reasoning.summary`):
+```json
+{
+  "model": "claude-opus-4-7",
+  "input": [{ "role": "user", "content": "Plan a refactor of foo()." }],
+  "reasoning": { "effort": "high", "summary": "concise" }
+}
+```
+
 ### `POST /v1/messages`
 
 Anthropic-compatible Messages API endpoint, suitable for Claude Code and the
@@ -233,12 +327,12 @@ model ID is left untouched.
 Some models advertise effort levels in the CLI but currently 404 on the
 backend when the suffixed ID is sent (observed for `claude-opus-4-6` —
 likely an entitlement/rollout gap). Suppress them with
-`AUGMENT_DISABLE_EFFORT_MODELS`:
+`AOP_DISABLE_EFFORT_MODELS`:
 
 ```env
-AUGMENT_DISABLE_EFFORT_MODELS=claude-opus-4-6
+AOP_DISABLE_EFFORT_MODELS=claude-opus-4-6
 # or, equivalently, using CLI short names:
-AUGMENT_DISABLE_EFFORT_MODELS=opus4.6,sonnet4.6
+AOP_DISABLE_EFFORT_MODELS=opus4.6,sonnet4.6
 ```
 
 Listed models still appear in `/v1/models` under their base ID, but their
@@ -271,9 +365,9 @@ This feature relies on a runtime patch of `@augmentcode/auggie-sdk` because the 
 ### Structured logging
 
 Per-request logs are emitted to stdout, one record per request, controlled
-by two environment variables: `LOGGING` (verbosity) and `LOG_FORMAT` (shape).
+by two environment variables: `AOP_LOGGING` (verbosity) and `AOP_LOG_FORMAT` (shape).
 
-**Levels** (`LOGGING`):
+**Levels** (`AOP_LOGGING`):
 
 | Level | What is logged |
 |---|---|
@@ -281,7 +375,7 @@ by two environment variables: `LOGGING` (verbosity) and `LOG_FORMAT` (shape).
 | `info` *(default)* | `ts`, `method`, `path`, `status`, `durationMs`, `requestId`, `model`, `effectiveModel` (when the effort suffix swap rewrote the ID), `stream`, and `usage` (`input_tokens` / `output_tokens` / `total_tokens`). |
 | `body` | Everything in `info` plus the parsed `request` body and the assembled `response` body. For streaming responses the assembled response is the concatenated text / thinking / tool-call arguments — not the raw SSE frames. |
 
-**Formats** (`LOG_FORMAT`):
+**Formats** (`AOP_LOG_FORMAT`):
 
 | Format | When to use |
 |---|---|
@@ -352,7 +446,7 @@ that the proxy does not.
 |---|---|
 | `401 Unauthorized` or auth errors | Run `auggie login` and re-authenticate, or set `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in `.env`. |
 | `model not found` | Check the model name — use `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-1`, etc. See your Augment dashboard for available models. |
-| Proxy won't start | Verify `PORT` is not already in use: `netstat -ano \| findstr :7888` |
+| Proxy won't start | Verify `AOP_PORT` is not already in use: `netstat -ano \| findstr :7888` |
 | Streaming hangs | Ensure `stream: true` is set in the request body and the client supports SSE. |
 | SDK connection errors | Check your network connection and that `~/.augment/session.json` exists and is not expired. Run `auggie login` to refresh. |
 

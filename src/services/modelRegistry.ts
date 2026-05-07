@@ -99,7 +99,7 @@ export function expandModelEntry(entry: ModelEntry): string[] {
 }
 
 /**
- * Parse `AUGMENT_DISABLE_EFFORT_MODELS` into a Set of canonical base IDs whose
+ * Parse `AOP_DISABLE_EFFORT_MODELS` into a Set of canonical base IDs whose
  * advertised effort levels should be ignored. Use this for models the CLI
  * advertises levels for but the backend currently rejects suffixed IDs on
  * (observed for `claude-opus-4-6`, likely an entitlement/rollout gap).
@@ -109,7 +109,7 @@ export function expandModelEntry(entry: ModelEntry): string[] {
  * or whitespace-separated, case-sensitive after normalisation.
  */
 export function getEffortDisabledBaseIds(): Set<string> {
-  const raw = process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+  const raw = process.env.AOP_DISABLE_EFFORT_MODELS;
   if (!raw) return new Set();
   return new Set(
     raw
@@ -141,7 +141,7 @@ async function fetchModelEntries(): Promise<ModelEntry[]> {
         const effortLevels = disabled.has(baseId) ? [] : advertised;
         if (disabled.has(baseId) && advertised.length > 0) {
           console.debug(
-            `[modelRegistry] effort levels disabled for ${baseId} via AUGMENT_DISABLE_EFFORT_MODELS (advertised: ${advertised.join(", ")})`
+            `[modelRegistry] effort levels disabled for ${baseId} via AOP_DISABLE_EFFORT_MODELS (advertised: ${advertised.join(", ")})`
           );
         }
         entries.push({ baseId, effortLevels });

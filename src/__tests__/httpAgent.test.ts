@@ -47,9 +47,9 @@ describe("readTimeoutsFromEnv", () => {
 
   it("honours per-axis env overrides", () => {
     const t = readTimeoutsFromEnv({
-      AUGMENT_HEADERS_TIMEOUT_MS: "60000",
-      AUGMENT_BODY_TIMEOUT_MS: "120000",
-      AUGMENT_CONNECT_TIMEOUT_MS: "5000",
+      AOP_HEADERS_TIMEOUT_MS: "60000",
+      AOP_BODY_TIMEOUT_MS: "120000",
+      AOP_CONNECT_TIMEOUT_MS: "5000",
     });
     expect(t).toEqual({
       headersTimeout: 60_000,
@@ -60,8 +60,8 @@ describe("readTimeoutsFromEnv", () => {
 
   it("allows individual timeouts to be disabled with 0", () => {
     const t = readTimeoutsFromEnv({
-      AUGMENT_HEADERS_TIMEOUT_MS: "0",
-      AUGMENT_BODY_TIMEOUT_MS: "0",
+      AOP_HEADERS_TIMEOUT_MS: "0",
+      AOP_BODY_TIMEOUT_MS: "0",
     });
     expect(t.headersTimeout).toBe(0);
     expect(t.bodyTimeout).toBe(0);

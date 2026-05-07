@@ -5,10 +5,10 @@ import { config } from "dotenv";
 // This module is the entry point for environment setup.
 config();
 
-export const PORT = parseInt(process.env.PORT || "7888", 10);
-export const HOST = process.env.HOST || "localhost";
+export const PORT = parseInt(process.env.AOP_PORT || "7888", 10);
+export const HOST = process.env.AOP_HOST || "localhost";
 
-// Structured-logging verbosity. `LOGGING` (alias `LOG_LEVEL`) accepts:
+// Structured-logging verbosity. `AOP_LOGGING` (alias `AOP_LOG_LEVEL`) accepts:
 //   - "none" / "off" / "silent" → no per-request log lines
 //   - "info"                    → one JSON line per request with method, path,
 //                                 status, durationMs, model, usage (default)
@@ -25,7 +25,7 @@ function parseLogLevel(raw: string | undefined): LogLevel {
 }
 
 export const LOG_LEVEL: LogLevel = parseLogLevel(
-  process.env.LOGGING ?? process.env.LOG_LEVEL
+  process.env.AOP_LOGGING ?? process.env.AOP_LOG_LEVEL
 );
 
 // Output shape for log records. `text` (default) emits a human-readable
@@ -39,4 +39,4 @@ function parseLogFormat(raw: string | undefined): LogFormat {
   return "text";
 }
 
-export const LOG_FORMAT: LogFormat = parseLogFormat(process.env.LOG_FORMAT);
+export const LOG_FORMAT: LogFormat = parseLogFormat(process.env.AOP_LOG_FORMAT);

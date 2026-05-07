@@ -11,9 +11,9 @@ import { Agent, setGlobalDispatcher } from "undici";
  * All values are in milliseconds. `0` disables the corresponding timeout.
  *
  * Env vars:
- *   AUGMENT_HEADERS_TIMEOUT_MS — first response byte (default: 1_800_000 = 30 min)
- *   AUGMENT_BODY_TIMEOUT_MS    — between body chunks  (default: 1_800_000 = 30 min)
- *   AUGMENT_CONNECT_TIMEOUT_MS — TCP connect          (default: 30_000  = 30 s)
+ *   AOP_HEADERS_TIMEOUT_MS — first response byte (default: 1_800_000 = 30 min)
+ *   AOP_BODY_TIMEOUT_MS    — between body chunks  (default: 1_800_000 = 30 min)
+ *   AOP_CONNECT_TIMEOUT_MS — TCP connect          (default: 30_000  = 30 s)
  */
 export interface HttpAgentTimeouts {
   headersTimeout: number;
@@ -44,9 +44,9 @@ export function parseTimeoutMs(raw: string | undefined, fallback: number): numbe
  */
 export function readTimeoutsFromEnv(env: NodeJS.ProcessEnv = process.env): HttpAgentTimeouts {
   return {
-    headersTimeout: parseTimeoutMs(env.AUGMENT_HEADERS_TIMEOUT_MS, DEFAULT_HEADERS_TIMEOUT_MS),
-    bodyTimeout: parseTimeoutMs(env.AUGMENT_BODY_TIMEOUT_MS, DEFAULT_BODY_TIMEOUT_MS),
-    connectTimeout: parseTimeoutMs(env.AUGMENT_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS),
+    headersTimeout: parseTimeoutMs(env.AOP_HEADERS_TIMEOUT_MS, DEFAULT_HEADERS_TIMEOUT_MS),
+    bodyTimeout: parseTimeoutMs(env.AOP_BODY_TIMEOUT_MS, DEFAULT_BODY_TIMEOUT_MS),
+    connectTimeout: parseTimeoutMs(env.AOP_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS),
   };
 }
 

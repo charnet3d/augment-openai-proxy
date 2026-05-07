@@ -6,13 +6,13 @@ import { Hono } from "hono";
 // We assign empty strings rather than `delete`-ing because `src/config.ts`
 // calls `dotenv.config()` at module evaluation time; resetModules causes it
 // to re-read the developer's local `.env`, which would otherwise leak values
-// like `LOGGING=body` into tests that expect the default. dotenv skips keys
+// like `AOP_LOGGING=body` into tests that expect the default. dotenv skips keys
 // already present in process.env, and the parsers map "" to the default.
 async function importLogger(level: string | undefined, format?: string) {
   vi.resetModules();
-  process.env.LOGGING = level ?? "";
-  process.env.LOG_LEVEL = level ?? "";
-  process.env.LOG_FORMAT = format ?? "";
+  process.env.AOP_LOGGING = level ?? "";
+  process.env.AOP_LOG_LEVEL = level ?? "";
+  process.env.AOP_LOG_FORMAT = format ?? "";
   return await import("../services/logger");
 }
 
@@ -34,9 +34,9 @@ describe("logger", () => {
     logSpy.mockRestore();
     // See importLogger above — empty strings keep dotenv from reloading
     // the developer's local .env values into the next test.
-    process.env.LOGGING = "";
-    process.env.LOG_LEVEL = "";
-    process.env.LOG_FORMAT = "";
+    process.env.AOP_LOGGING = "";
+    process.env.AOP_LOG_LEVEL = "";
+    process.env.AOP_LOG_FORMAT = "";
   });
 
   describe("level parsing", () => {

@@ -324,9 +324,9 @@ describe("resolveEffortModelId", () => {
   });
 });
 
-describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
+describe("AOP_DISABLE_EFFORT_MODELS env override", () => {
   let execFileMock: ReturnType<typeof vi.fn>;
-  const ORIGINAL_ENV = process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+  const ORIGINAL_ENV = process.env.AOP_DISABLE_EFFORT_MODELS;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -340,12 +340,12 @@ describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
   });
 
   afterEach(() => {
-    if (ORIGINAL_ENV === undefined) delete process.env.AUGMENT_DISABLE_EFFORT_MODELS;
-    else process.env.AUGMENT_DISABLE_EFFORT_MODELS = ORIGINAL_ENV;
+    if (ORIGINAL_ENV === undefined) delete process.env.AOP_DISABLE_EFFORT_MODELS;
+    else process.env.AOP_DISABLE_EFFORT_MODELS = ORIGINAL_ENV;
   });
 
   it("strips suffixed variants from /v1/models for disabled base IDs", async () => {
-    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
+    process.env.AOP_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
     const { listModels } = await import("../services/modelRegistry");
     const ids = (await listModels()).data.map((m) => m.id);
     // opus-4-6 base is still listed, but its suffixed variants are gone.
@@ -360,7 +360,7 @@ describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
   });
 
   it("makes resolveEffortModelId return undefined for disabled base IDs", async () => {
-    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
+    process.env.AOP_DISABLE_EFFORT_MODELS = "claude-opus-4-6";
     const { resolveEffortModelId } = await import("../services/modelRegistry");
     expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
     // opus-4-7 still resolves normally.
@@ -368,13 +368,13 @@ describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
   });
 
   it("accepts CLI short names and normalises them through expandShortName", async () => {
-    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "opus4.6";
+    process.env.AOP_DISABLE_EFFORT_MODELS = "opus4.6";
     const { resolveEffortModelId } = await import("../services/modelRegistry");
     expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
   });
 
   it("supports multiple comma- or whitespace-separated entries", async () => {
-    process.env.AUGMENT_DISABLE_EFFORT_MODELS = "claude-opus-4-6, claude-opus-4-7";
+    process.env.AOP_DISABLE_EFFORT_MODELS = "claude-opus-4-6, claude-opus-4-7";
     const { resolveEffortModelId, listModels } = await import("../services/modelRegistry");
     expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBeUndefined();
     expect(await resolveEffortModelId("claude-opus-4-7", "high")).toBeUndefined();
@@ -384,7 +384,7 @@ describe("AUGMENT_DISABLE_EFFORT_MODELS env override", () => {
   });
 
   it("is a no-op when the env var is unset or empty", async () => {
-    delete process.env.AUGMENT_DISABLE_EFFORT_MODELS;
+    delete process.env.AOP_DISABLE_EFFORT_MODELS;
     const { resolveEffortModelId } = await import("../services/modelRegistry");
     expect(await resolveEffortModelId("claude-opus-4-6", "high")).toBe("claude-opus-4-6-high");
   });

@@ -1,0 +1,29 @@
+services:
+  augment-open-proxy:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+      # Shadow the host node_modules so the container manages its own copy.
+      - /app/node_modules
+      # Mount the Augment session so the proxy can authenticate via `auggie login`.
+      # Remove this volume (and set AUGMENT_API_TOKEN instead) if you prefer token auth.
+      - ${AUGMENT_SESSION_DIR:-~/.augment}:/root/.augment:ro
+    command: sh -c "npm install -g @augmentcode/auggie && npm install --prefer-offline && npx tsx src/index.ts"
+    ports:
+      - "${AOP_PORT:-7888}:${AOP_PORT:-7888}"
+    environment:
+      AOP_PORT: ${AOP_PORT:-7888}
+      AOP_HOST: "0.0.0.0"
+      AUGMENT_API_TOKEN: ${AUGMENT_API_TOKEN:-}
+      AUGMENT_API_URL: ${AUGMENT_API_URL:-}
+      AOP_DISABLE_EFFORT_MODELS: ${AOP_DISABLE_EFFORT_MODELS:-}
+      AOP_LOGGING: ${AOP_LOGGING:-info}
+      AOP_LOG_FORMAT: ${AOP_LOG_FORMAT:-text}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-7888}/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

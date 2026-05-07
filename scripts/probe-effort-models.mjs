@@ -21,11 +21,11 @@ import { AugmentLanguageModel, resolveAugmentCredentials } from "@augmentcode/au
 // (xHigh is Opus 4.7 only; Low/Max absent from Opus 4.7)
 // Probing all casings/separators in case undocumented variants exist.
 const BASES = [
-  "claude-opus-4-6",        // effortLevels: Low, Medium, High, Max
-  "claude-opus-4-6-500k",   // effortLevels: Low, Medium, High, Max
+  // "claude-opus-4-6",        // effortLevels: Low, Medium, High, Max
+  // "claude-opus-4-6-500k",   // effortLevels: Low, Medium, High, Max
   "claude-opus-4-7",        // effortLevels: Medium, High, xHigh
-  "claude-opus-4-7-500k",   // effortLevels: High
-  "claude-sonnet-4-6-500k", // effortLevels: Low, Medium, High, Max
+  // "claude-opus-4-7-500k",   // effortLevels: High
+  // "claude-sonnet-4-6-500k", // effortLevels: Low, Medium, High, Max\
 ];
 const SUFFIXES = [
   "",

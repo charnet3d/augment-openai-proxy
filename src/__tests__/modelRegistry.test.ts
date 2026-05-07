@@ -496,7 +496,7 @@ import { expandShortName } from "../services/modelRegistry";
 
 describe("expandShortName", () => {
   it.each([
-    // Claude models
+    // Claude models — base
     ["haiku4.5",  "claude-haiku-4-5"],
     ["sonnet4",   "claude-sonnet-4"],
     ["sonnet4.5", "claude-sonnet-4-5"],
@@ -504,6 +504,10 @@ describe("expandShortName", () => {
     ["opus4.5",   "claude-opus-4-5"],
     ["opus4.6",   "claude-opus-4-6"],
     ["opus4.7",   "claude-opus-4-7"],
+    // Claude models — 500k context variants
+    ["opus4.6-500k",   "claude-opus-4-6-500k"],
+    ["sonnet4.6-500k", "claude-sonnet-4-6-500k"],
+    ["opus4.7-500k",   "claude-opus-4-7-500k"],
     // GPT models
     ["gpt5",      "gpt-5"],
     ["gpt5.1",    "gpt-5-1"],

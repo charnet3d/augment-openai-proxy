@@ -13,18 +13,21 @@ const ORDERED_EFFORT_LEVELS = ["low", "medium", "high", "max", "xhigh"] as const
  * Convert an Augment CLI short name to the canonical backend model ID.
  *
  * Rules (confirmed by probing the backend without CHAT-mode override):
- *   Claude  haiku/sonnet/opus + version   →  claude-{family}-{version, dots→dashes}
+ *   Claude  haiku/sonnet/opus + version + optional suffix
+ *                                         →  claude-{family}-{version, dots→dashes}{-suffix}
+ *                                            e.g. opus4.6-500k → claude-opus-4-6-500k
  *   GPT     gpt{version}                  →  gpt-{version, dots→dashes}
  *   Gemini  gemini-{X.Y}-{rest}           →  gemini-{X-Y}-{rest}  (dots→dashes)
  *   Others  (e.g. code-review)            →  pass through, dots→dashes
  */
 export function expandShortName(shortName: string): string {
-  // Claude: haiku/sonnet/opus + numeric version
-  const claudeMatch = shortName.match(/^(haiku|sonnet|opus)(\d[\d.]*)$/i);
+  // Claude: haiku/sonnet/opus + numeric version + optional dash-suffix (e.g. -500k)
+  const claudeMatch = shortName.match(/^(haiku|sonnet|opus)(\d[\d.]*)(-[a-z0-9]+)?$/i);
   if (claudeMatch) {
     const family = claudeMatch[1].toLowerCase();
     const version = claudeMatch[2].replace(/\./g, "-");
-    return `claude-${family}-${version}`;
+    const suffix = claudeMatch[3] ?? "";
+    return `claude-${family}-${version}${suffix}`;
   }
 
   // GPT: gpt{version} → gpt-{version}

@@ -172,6 +172,60 @@ describe("modelRegistry", () => {
       await getModelIds();
       expect(execFileMock).toHaveBeenCalledTimes(1);
     });
+
+    it("should not retry auggie within the cooldown window after a fallback", async () => {
+      failWith(new Error("auggie: command not found"));
+      const { getModelIds } = await import("../services/modelRegistry");
+      await getModelIds();
+      await getModelIds();
+      await getModelIds();
+      // Within the cooldown the fallback cache is served without calling auggie again.
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("should retry auggie after the cooldown has elapsed", async () => {
+      vi.useFakeTimers();
+      failWith(new Error("auggie: command not found"));
+      const { getModelIds, RETRY_COOLDOWN_MS } = await import("../services/modelRegistry");
+      await getModelIds();
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+
+      // Still within cooldown — no retry yet.
+      await getModelIds();
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+
+      // Advance past the cooldown — next call must retry auggie.
+      vi.advanceTimersByTime(RETRY_COOLDOWN_MS + 1);
+      await getModelIds();
+      expect(execFileMock).toHaveBeenCalledTimes(2);
+
+      vi.useRealTimers();
+    });
+
+    it("should lock in the real result once auggie eventually succeeds", async () => {
+      vi.useFakeTimers();
+      // First call fails → fallback
+      failWith(new Error("not ready"));
+      const { getModelIds, FALLBACK_MODEL_IDS, RETRY_COOLDOWN_MS } = await import("../services/modelRegistry");
+      const first = await getModelIds();
+      expect(first).toEqual([...FALLBACK_MODEL_IDS]);
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+
+      // Advance past cooldown then succeed → real model list, now cached permanently
+      vi.advanceTimersByTime(RETRY_COOLDOWN_MS + 1);
+      succeedWith(SAMPLE_CLI_OUTPUT);
+      const second = await getModelIds();
+      expect(second).toContain("claude-haiku-4-5");
+      expect(second).not.toEqual([...FALLBACK_MODEL_IDS]);
+      expect(execFileMock).toHaveBeenCalledTimes(2);
+
+      // Further calls never hit the CLI again — real result is locked in
+      await getModelIds();
+      await getModelIds();
+      expect(execFileMock).toHaveBeenCalledTimes(2);
+
+      vi.useRealTimers();
+    });
   });
 
   describe("FALLBACK_MODEL_IDS", () => {

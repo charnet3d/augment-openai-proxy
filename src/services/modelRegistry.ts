@@ -69,6 +69,17 @@ export interface ModelEntry {
 
 let cachedEntries: ModelEntry[] | null = null;
 let cachedModelIds: string[] | null = null;
+// True when the cached result came from the hardcoded fallback rather than a
+// live `auggie` call. The cache is intentionally not locked in on fallback so
+// the next request can retry the CLI (e.g. after a Docker container has fully
+// mounted the session volume and the network is available).
+let cacheIsFallback = false;
+// Timestamp (ms) of the last time we fell back to the hardcoded list. Used to
+// throttle retries: we attempt auggie at most once per RETRY_COOLDOWN_MS so a
+// persistently-broken CLI doesn't add a 10-second timeout penalty to every
+// request.
+let lastFallbackAt = 0;
+export const RETRY_COOLDOWN_MS = 30_000; // 30 seconds between retry attempts
 
 function runAuggieModelsList(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -76,7 +87,7 @@ function runAuggieModelsList(): Promise<string> {
       "auggie",
       ["models", "list", "--json"],
       // shell:true is required on Windows so npm-installed .cmd wrappers are found.
-      { timeout: 10_000, shell: true },
+      { timeout: 20_000, shell: true },
       (err, stdout) => {
         if (err) reject(err);
         else resolve(stdout);
@@ -120,7 +131,7 @@ export function getEffortDisabledBaseIds(): Set<string> {
   );
 }
 
-async function fetchModelEntries(): Promise<ModelEntry[]> {
+async function fetchModelEntries(): Promise<{ entries: ModelEntry[]; isFallback: boolean }> {
   const disabled = getEffortDisabledBaseIds();
   try {
     const stdout = await runAuggieModelsList();
@@ -146,29 +157,56 @@ async function fetchModelEntries(): Promise<ModelEntry[]> {
         }
         entries.push({ baseId, effortLevels });
       }
-      if (entries.length > 0) return entries;
+      if (entries.length > 0) return { entries, isFallback: false };
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn(`[modelRegistry] auggie models list failed (${reason}); using fallback model list`);
   }
   console.debug(`[modelRegistry] fallback model IDs: ${FALLBACK_MODEL_IDS.join(", ")}`);
-  return FALLBACK_MODEL_IDS.map((baseId) => ({ baseId, effortLevels: [] }));
+  return {
+    entries: FALLBACK_MODEL_IDS.map((baseId) => ({ baseId, effortLevels: [] })),
+    isFallback: true,
+  };
 }
 
 async function getModelEntries(): Promise<ModelEntry[]> {
-  if (!cachedEntries) {
-    cachedEntries = await fetchModelEntries();
+  // Use the cache when it holds a real (non-fallback) result.
+  if (cachedEntries !== null && !cacheIsFallback) {
+    return cachedEntries;
+  }
+  // When the cache is a fallback, only re-try auggie after the cooldown has
+  // elapsed. This prevents a persistently-broken CLI from adding a 10-second
+  // timeout penalty to every single request.
+  if (cachedEntries !== null && Date.now() - lastFallbackAt < RETRY_COOLDOWN_MS) {
+    return cachedEntries;
+  }
+  const { entries, isFallback } = await fetchModelEntries();
+  cachedEntries = entries;
+  cacheIsFallback = isFallback;
+  // Pre-derive and lock in the flat ID list only when the result is real.
+  // On fallback, leave cachedModelIds null so it is also retried next time.
+  if (isFallback) {
+    lastFallbackAt = Date.now();
+    cachedModelIds = null;
+  } else {
+    cachedModelIds = entries.flatMap(expandModelEntry);
   }
   return cachedEntries;
 }
 
 export async function getModelIds(): Promise<string[]> {
-  if (!cachedModelIds) {
-    const entries = await getModelEntries();
-    cachedModelIds = entries.flatMap(expandModelEntry);
+  if (cachedModelIds !== null) {
+    return cachedModelIds;
   }
-  return cachedModelIds;
+  const entries = await getModelEntries();
+  if (!cacheIsFallback) {
+    // Should already be set by getModelEntries, but be defensive.
+    cachedModelIds ??= entries.flatMap(expandModelEntry);
+    return cachedModelIds;
+  }
+  // Still on fallback — compute on the fly without caching.
+  return entries.flatMap(expandModelEntry);
 }
 
 export async function listModels(): Promise<ModelsListResponse> {
